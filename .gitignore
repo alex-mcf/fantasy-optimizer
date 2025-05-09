@@ -1,0 +1,27 @@
+# Byte-compiled files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environments
+venv/
+.env/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# VS Code settings
+.vscode/
+
+# Data files (projected stats, player data, etc.)
+*.csv
+*.tsv
+*.json
+*.xlsx
+
+# Logs
+*.log
+
+# System files
+.DS_Store
+Thumbs.db
