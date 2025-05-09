@@ -16,6 +16,7 @@ league_settings = {
         "WR" : 2, 
         "TE" : 1,
         "FLEX" : 1, 
+        "SuperFLEX" : 0,
         "K": 1,
         "D/ST": 1,
         "Bench": 6
