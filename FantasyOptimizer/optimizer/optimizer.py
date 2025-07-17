@@ -1,1 +1,1 @@
-# Produce results
+# Produce results (combine the settings to give an optimized draft of steals)
