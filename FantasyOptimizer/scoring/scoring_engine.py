@@ -5,26 +5,26 @@ from config.league_config import league_settings
 # Read in and simplify data
 # Data is sourced from fantasypros.com
 
-adp_2022 = pd.read_csv("FantasyOptimizer/data/2022/Pre_2022_ADP(HPPR).csv")
+adp_2022 = pd.read_csv("data/2022/Pre_2022_ADP(HPPR).csv")
 adp_2022 = adp_2022[["Rank","Player","Team","POS","AVG"]]
-results_2022 = pd.read_csv("FantasyOptimizer/data/2022/Post_2022_Results(HPPR).csv")
+results_2022 = pd.read_csv("data/2022/Post_2022_Results(HPPR).csv")
 results_2022 = results_2022[["Rank","Player","Pos","Team","AVG","TTL"]]
 joined_2022 = pd.merge(adp_2022, results_2022, on='Player', how='inner', suffixes=('_pre', '_post'))
 
-adp_2023 = pd.read_csv("FantasyOptimizer/data/2023/Pre_2023_ADP(HPPR).csv")
+adp_2023 = pd.read_csv("data/2023/Pre_2023_ADP(HPPR).csv")
 adp_2023 = adp_2023[["Rank","Player","Team", "POS", "AVG"]]
-results_2023 = pd.read_csv("FantasyOptimizer/data/2023/Post_2023_Results(HPPR).csv")
+results_2023 = pd.read_csv("data/2023/Post_2023_Results(HPPR).csv")
 results_2023 = results_2023[["Rank","Player","Pos","Team","AVG","TTL"]]
 joined_2023 = pd.merge(adp_2023, results_2023, on='Player', how='inner', suffixes=('_pre', '_post'))
 
 
-adp_2024 = pd.read_csv("FantasyOptimizer/data/2024/Pre_2024_ADP(HPPR).csv")
+adp_2024 = pd.read_csv("data/2024/Pre_2024_ADP(HPPR).csv")
 adp_2024 = adp_2024[["Rank","Player","Team", "POS", "AVG"]]
-results_2024 = pd.read_csv("FantasyOptimizer/data/2024/Post_2024_Results(HPPR).csv")
+results_2024 = pd.read_csv("data/2024/Post_2024_Results(HPPR).csv")
 results_2024 = results_2024[["Rank","Player","Pos","Team","AVG","TTL"]]
 joined_2024 = pd.merge(adp_2024, results_2024, on='Player', how='inner', suffixes=('_pre', '_post'))
 
-adp_2025 = pd.read_csv("FantasyOptimizer/data/2025/Pre_2025_ADP(HPPR).csv")
+adp_2025 = pd.read_csv("data/2025/Pre_2025_ADP(HPPR).csv")
 adp_2025 = adp_2025[["Rank","Player","Team", "POS", "AVG"]]
 
 # Scoring logic 
@@ -43,7 +43,7 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
     joined_2023["Year"] = 2023
     joined_2024["Year"] = 2024
 
-    all_years = pd.concat(joined_2022, joined_2023, joined_2024)
+    all_years = pd.concat([joined_2022, joined_2023, joined_2024])
 
     # Compute player rounds with correct league size
     all_years["Round"] = (all_years["AVG_pre"] / league_size).apply(np.ceil).astype(int)
@@ -82,7 +82,7 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
             for r in range(round_num + 1, max_round + 1):
                 r_avg = round_averages.get((year, r), 0)
                 if actual < r_avg:
-                    round_bonus -= 1
+                    round_modifier -= 1
 
             # TODO: potential durability modifier?
 
@@ -110,4 +110,5 @@ if __name__ == "__main__":
     # Sort and print top 20 players
     top_players = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
     for player, score in top_players[:20]:
+        print(f"{player.title():<25}  Score: {score}")
         print(f"{player.title():<25}  Score: {score}")
