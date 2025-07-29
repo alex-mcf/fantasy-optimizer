@@ -1,5 +1,6 @@
 # Configure the settings of your league
 league_settings = {
+    "league_size": 12,
     "pts_per_pass_yard" : 0.04,
     "pts_per_pass_td" : 4,
     "pts_per_int_thrown" : -2,
