@@ -45,6 +45,9 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
 
     all_years = pd.concat([joined_2022, joined_2023, joined_2024])
 
+    # Drop years where player didn't do anything
+    all_years = all_years.dropna(subset=["AVG_pre", "TTL"])
+
     # Compute player rounds with correct league size
     all_years["Round"] = (all_years["AVG_pre"] / league_size).apply(np.ceil).astype(int)
 
@@ -104,11 +107,23 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
     return player_scores
 
 if __name__ == "__main__":
-    # Run the scoring function
     player_scores = calculate_player_value(joined_2022, joined_2023, joined_2024)
 
-    # Sort and print top 20 players
-    top_players = sorted(player_scores.items(), key=lambda x: x[1], reverse=True)
+    # Combine all years
+    all_players = pd.concat([joined_2022, joined_2023, joined_2024])
+
+    # Clean POS values and filter out QBs
+    non_qbs = (
+        all_players[all_players["Pos"].fillna("").str.strip().str.upper() != "QB"]["Player"]
+        .dropna()
+        .unique()
+    )
+
+    # Filter scores to only non-QBs
+    non_qb_scores = {player: score for player, score in player_scores.items() if player in non_qbs}
+
+    # Sort and print top 20 non-QBs
+    top_players = sorted(non_qb_scores.items(), key=lambda x: x[1], reverse=True)
+    print("\nTop 20 Non-QB Player Scores:")
     for player, score in top_players[:20]:
-        print(f"{player.title():<25}  Score: {score}")
-        print(f"{player.title():<25}  Score: {score}")
+        print(f"{player:<25} Score: {score}")
