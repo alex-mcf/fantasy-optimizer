@@ -72,7 +72,7 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
             year = row["Year"]
 
             # Gain/lose points dependant on scores
-            performance_modifier = (actual - expected) // 5
+            performance_modifier = (actual - expected) // 6
 
             round_modifier = 0
             max_round = all_years["Round"].max()
@@ -93,13 +93,13 @@ def calculate_player_value(joined_2022, joined_2023, joined_2024):
             if performance_modifier > 0:
                 success_year_counter += 1
 
-            total_score += performance_modifier + (round_modifier * 7) # TODO: durability
+            total_score += performance_modifier + (round_modifier * 4.5) # TODO: durability
         
         # Penalize players who haven't played all 3 years
-        sample_size_modifier = -7 if years_played == 1 else 0
+        sample_size_modifier = {1: -7, 2: -3}.get(years_played, 0)
 
         # Weight those who are consistent to have better scores
-        consistency_modifier = {1: 1.0, 2: 1.5, 3: 2.0}.get(success_year_counter, 1.0)
+        consistency_modifier = {1: 1.0, 2: 1.25, 3: 1.5}.get(success_year_counter, 1.0)
 
         final_score = round((total_score + sample_size_modifier) * consistency_modifier, 2)
         player_scores[player] = final_score
@@ -112,18 +112,25 @@ if __name__ == "__main__":
     # Combine all years
     all_players = pd.concat([joined_2022, joined_2023, joined_2024])
 
-    # Clean POS values and filter out QBs
-    non_qbs = (
-        all_players[all_players["Pos"].fillna("").str.strip().str.upper() != "QB"]["Player"]
+    # Define positions to exclude
+    excluded_positions = {"QB", "K", "DST"}
+
+    # Filter out excluded positions (normalize and clean)
+    valid_players = (
+        all_players[
+            ~all_players["Pos"].fillna("").str.strip().str.upper().isin(excluded_positions)
+        ]["Player"]
         .dropna()
         .unique()
     )
 
-    # Filter scores to only non-QBs
-    non_qb_scores = {player: score for player, score in player_scores.items() if player in non_qbs}
+    # Filter the score dictionary to only valid non-QB/K/DST players
+    filtered_scores = {
+        player: score for player, score in player_scores.items() if player in valid_players
+    }
 
-    # Sort and print top 20 non-QBs
-    top_players = sorted(non_qb_scores.items(), key=lambda x: x[1], reverse=True)
-    print("\nTop 20 Non-QB Player Scores:")
+    # Sort and print top 20
+    top_players = sorted(filtered_scores.items(), key=lambda x: x[1], reverse=True)
+    print("\nTop 20 Non-QB/K/DST Player Scores:")
     for player, score in top_players[:20]:
         print(f"{player:<25} Score: {score}")
