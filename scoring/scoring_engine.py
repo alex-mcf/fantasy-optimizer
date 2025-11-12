@@ -5,6 +5,8 @@ from config.league_config import league_settings
 # Read in and simplify data
 # Data is sourced from fantasypros.com
 
+# WIP run : .\.venv\Scripts\python.exe -m streamlit run app.py 
+
 adp_2022 = pd.read_csv("data/2022/Pre_2022_ADP(HPPR).csv")
 adp_2022 = adp_2022[["Rank","Player","Team","POS","AVG"]]
 results_2022 = pd.read_csv("data/2022/Post_2022_Results(HPPR).csv")
