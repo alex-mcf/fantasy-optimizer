@@ -1,27 +1,32 @@
-# Byte-compiled files
+# 
+# Python cache / build
 __pycache__/
 *.py[cod]
 *.so
 
 # Virtual environments
+.venv/
 venv/
+env/
 .env/
 
-# Jupyter notebook checkpoints
+# Jupyter
 .ipynb_checkpoints/
 
-# VS Code settings
+# Editors / OS
 .vscode/
+.DS_Store
+Thumbs.db
 
-# Data files (projected stats, player data, etc.)
-*.csv
-*.tsv
-*.json
-*.xlsx
+# Project data
+# Ignore raw data only (keeps your CSVs in repo unless in data/raw/)
+data/raw/
+!data/raw/.gitkeep
+
+# Ignore model output artifacts
+models/
+*.pkl
+*.joblib
 
 # Logs
 *.log
-
-# System files
-.DS_Store
-Thumbs.db

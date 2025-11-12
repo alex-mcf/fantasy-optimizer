@@ -1,3 +1,28 @@
+# ML model to score players based on past draft and performance data
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+'''
 import pandas as pd
 import numpy as np
 from config.league_config import league_settings
@@ -136,3 +161,5 @@ if __name__ == "__main__":
     print("\nTop 20 Non-QB/K/DST Player Scores:")
     for player, score in top_players[:20]:
         print(f"{player:<25} Score: {score}")
+
+'''
