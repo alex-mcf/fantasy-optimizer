@@ -12,6 +12,6 @@ def compute_risk(df):
         df["risk"] = 0
 
     # Higher risk = penalize score
-    df["risk_penalty"] = df["risk"] * 0.2
+    df["risk_penalty"] = df["risk"] * 0.3
 
     return df
