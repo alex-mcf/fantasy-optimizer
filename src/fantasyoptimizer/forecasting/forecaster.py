@@ -15,12 +15,25 @@ from fantasyoptimizer.utils.data_loader import (
     available_player_context_years,
     available_result_years,
     load_adp,
+    load_player_metadata,
     load_results,
     load_player_team_context,
     load_team_position_context,
 )
 
 PLAYER_FEATURE_COLUMNS = [
+    "age",
+    "age_squared",
+    "age_known",
+    "experience",
+    "experience_known",
+    "rookie",
+    "sophomore",
+    "drafted",
+    "draft_round",
+    "draft_pick",
+    "height",
+    "weight",
     "lag1_ppg",
     "lag2_ppg",
     "lag3_ppg",
@@ -150,7 +163,7 @@ class MarketResidualModel:
     """Use ADP as a baseline, then learn position-specific market mistakes."""
 
     alpha_market: float = 8.0
-    alpha_residual: float = 100.0
+    alpha_residual: float = 300.0
     residual_feature_columns: tuple[str, ...] = tuple(FEATURE_COLUMNS)
     market_models_: dict[str, RidgeModel] = field(default_factory=dict)
     residual_models_: dict[str, RidgeModel] = field(default_factory=dict)
@@ -291,20 +304,64 @@ def _text_or_empty(value: object) -> str:
     return "" if value is None or pd.isna(value) else str(value)
 
 
+def _number_or(value: object, default: float) -> float:
+    return default if value is None or pd.isna(value) else float(value)
+
+
+def _enrich_player_metadata(
+    candidates: pd.DataFrame,
+    player_metadata: pd.DataFrame | None,
+    target_year: int,
+) -> pd.DataFrame:
+    if player_metadata is None or player_metadata.empty:
+        return candidates.copy()
+    metadata = player_metadata.copy()
+    metadata = metadata[
+        metadata["rookie_season"].isna()
+        | (metadata["rookie_season"] <= target_year)
+    ].copy()
+    metadata["rookie_distance"] = target_year - metadata["rookie_season"].fillna(-999)
+    metadata = metadata.sort_values(
+        ["player_key", "pos", "rookie_distance", "gsis_id"],
+        ascending=[True, True, True, True],
+    ).drop_duplicates(["player_key", "pos"], keep="first")
+    keep = [
+        "player_key",
+        "pos",
+        "birth_date",
+        "height",
+        "weight",
+        "rookie_season",
+        "draft_round",
+        "draft_pick",
+        "college_name",
+        "gsis_id",
+    ]
+    return candidates.merge(
+        metadata[keep], on=["player_key", "pos"], how="left", validate="many_to_one"
+    )
+
+
 def build_features(
     candidates: pd.DataFrame,
     history: pd.DataFrame,
     target_year: int,
     team_context: pd.DataFrame | None = None,
     player_team_context: pd.DataFrame | None = None,
+    player_metadata: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Create features using only seasons strictly before ``target_year``."""
+    candidates = _enrich_player_metadata(candidates, player_metadata, target_year)
     if not history.empty and int(history["year"].max()) >= target_year:
         history = history[history["year"] < target_year].copy()
-    indexed = {
-        key: group.set_index("year").sort_index()
-        for key, group in history.groupby(["player_key", "pos"])
-    }
+    indexed = (
+        {
+            key: group.set_index("year").sort_index()
+            for key, group in history.groupby(["player_key", "pos"])
+        }
+        if not history.empty
+        else {}
+    )
     if team_context is None or team_context.empty:
         team_context = _derive_team_context(history)
     elif int(team_context["year"].max()) >= target_year:
@@ -498,6 +555,24 @@ def build_features(
         )
         same_team = int(bool(previous_team) and previous_team == candidate_team)
         changed_team = int(bool(previous_team) and bool(candidate_team) and not same_team)
+        birth_date = candidate.get("birth_date")
+        age_known = int(birth_date is not None and not pd.isna(birth_date))
+        age = (
+            (pd.Timestamp(target_year, 9, 1) - pd.Timestamp(birth_date)).days / 365.25
+            if age_known
+            else 0.0
+        )
+        rookie_season = candidate.get("rookie_season")
+        experience_known = int(
+            rookie_season is not None and not pd.isna(rookie_season)
+        )
+        experience = (
+            max(0.0, float(target_year - rookie_season))
+            if experience_known
+            else 0.0
+        )
+        draft_pick = candidate.get("draft_pick")
+        drafted = int(draft_pick is not None and not pd.isna(draft_pick))
         role_shares: list[float] = []
         for index, lag_row in enumerate(lags):
             if lag_row is None:
@@ -547,6 +622,18 @@ def build_features(
         record = dict(candidate)
         record.update(
             {
+                "age": age,
+                "age_squared": age * age,
+                "age_known": age_known,
+                "experience": experience,
+                "experience_known": experience_known,
+                "rookie": int(experience_known and experience == 0),
+                "sophomore": int(experience_known and experience == 1),
+                "drafted": drafted,
+                "draft_round": _number_or(candidate.get("draft_round"), 8.0),
+                "draft_pick": float(draft_pick) if drafted else 300.0,
+                "height": _number_or(candidate.get("height"), 0.0),
+                "weight": _number_or(candidate.get("weight"), 0.0),
                 "lag1_ppg": lag_ppg[0],
                 "lag2_ppg": lag_ppg[1],
                 "lag3_ppg": lag_ppg[2],
@@ -619,6 +706,7 @@ def build_training_examples(
     history = _result_history(result_years, data_dir)
     team_context = _team_context_history(result_years, data_dir)
     player_team_context = _player_team_context_history(result_years, data_dir)
+    player_metadata = load_player_metadata(data_dir)
     examples: list[pd.DataFrame] = []
     for target_year in result_years:
         if target_year not in adp_years or target_year == min(result_years):
@@ -631,6 +719,7 @@ def build_training_examples(
             target_year,
             team_context,
             player_team_context,
+            player_metadata,
         )
         actual = load_results(target_year, data_dir)[
             ["player_key", "pos", "pts_ttl", "pts_avg", "gp"]
@@ -672,6 +761,9 @@ def _add_value_ranks(forecast: pd.DataFrame, config: LeagueConfig) -> pd.DataFra
         forecast["adp_avg"].rank(method="first", ascending=True).astype(int)
     )
     forecast["fair_adp"] = forecast["model_rank"]
+    forecast["actionable_adp"] = (
+        0.75 * forecast["market_rank"] + 0.25 * forecast["fair_adp"]
+    ).round().astype(int)
     forecast["raw_adp_gap"] = forecast["adp_avg"] - forecast["model_rank"]
     forecast["value_gap"] = forecast["market_rank"] - forecast["model_rank"]
     return forecast
@@ -728,12 +820,14 @@ def forecast_season(
     history = _result_history(prior_years, data_dir)
     team_context = _team_context_history(prior_years, data_dir)
     player_team_context = _player_team_context_history(prior_years, data_dir)
+    player_metadata = load_player_metadata(data_dir)
     features = build_features(
         candidates,
         history,
         target_year,
         team_context,
         player_team_context,
+        player_metadata,
     )
     point_components = model.predict_components(features)
     features["market_points"] = np.clip(

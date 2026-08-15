@@ -17,6 +17,7 @@ from fantasyoptimizer.utils.data_loader import (  # noqa: E402
     available_result_years,
     data_quality_report,
     load_adp,
+    load_player_metadata,
     load_results,
     load_player_team_context,
     load_team_position_context,
@@ -29,6 +30,17 @@ def validate_archive(data_dir: Path) -> list[str]:
     result_years = available_result_years(data_dir)
     context_years = set(available_context_years(data_dir))
     player_context_years = set(available_player_context_years(data_dir))
+    players_path = data_dir / "players" / "players.csv"
+    players_meta_path = players_path.with_suffix(".meta.json")
+    player_metadata = load_player_metadata(data_dir)
+    if player_metadata.empty:
+        errors.append("Player biography/draft metadata is missing")
+    if not players_meta_path.exists():
+        errors.append("Player metadata is missing provenance metadata")
+    else:
+        players_metadata = json.loads(players_meta_path.read_text(encoding="utf-8"))
+        if players_metadata.get("source") != "nflverse players v2":
+            errors.append("Player metadata has a different source")
     for year in adp_years:
         csv_path = data_dir / str(year) / f"Pre_{year}_ADP(HPPR).csv"
         meta_path = csv_path.with_suffix(".meta.json")
@@ -100,6 +112,7 @@ def main() -> None:
     print(f"Result seasons: {result_years}")
     print(f"Team-position context seasons: {available_context_years(data_dir)}")
     print(f"Player-team context seasons: {available_player_context_years(data_dir)}")
+    print(f"Player metadata rows: {len(load_player_metadata(data_dir))}")
     print(f"Complete retrospective seasons: {complete}")
     if complete:
         print(data_quality_report(complete, data_dir).to_string(index=False))

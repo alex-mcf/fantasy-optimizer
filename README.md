@@ -22,6 +22,7 @@ Raw data is intentionally excluded from Git. Build the complete local archive:
 ```bash
 python scripts/import_nflverse_results.py 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025
 python scripts/import_ffc_adp.py 2018 2019 2020 2021 2022 2023 2024 2025 2026
+python scripts/import_nflverse_players.py
 python scripts/validate_data.py
 ```
 
@@ -47,7 +48,8 @@ python -m unittest discover -s tests -v
 The model is deliberately small and auditable. For every target season it
 builds player features from only the preceding three completed NFL seasons:
 recent points per game, games played, total points, trend, available history,
-and position. It also builds destination team-position features from actual
+age, experience, rookie/sophomore status, NFL draft capital, and position. It
+also builds destination team-position features from actual
 weekly production. The signals are deliberately separated into player ability
 (points, points per game, and points per opportunity), role (share of the
 position's opportunities), and environment (team-position volume plus teammate
@@ -98,8 +100,15 @@ The live draft decision board accepts the current pick, next pick, drafted
 players, and roster counts. It estimates whether each available player will
 survive to the next selection using mock-draft variability, then labels choices
 as draft now, consider now, target while waiting, wait, or pass. This is an
-auditable heuristic; historical full-draft simulation is still required before
-treating it as an optimized roster policy.
+auditable heuristic.
+
+Paired historical snake-draft simulations now compare ADP-only drafting, pure
+model drafting, and the actionable policy. The actionable policy deliberately
+keeps 75% of market rank and applies only 25% of the model adjustment. This
+bounded policy is used because the simulations show that replacing ADP with the
+pure model can damage complete rosters even when average rank error improves.
+Simulated lineups use realized season points and position/roster constraints,
+but omit waivers and weekly start/sit decisions.
 
 Every ADP refresh now preserves an immutable timestamped copy under that
 season's `snapshots/` folder. Once multiple points in the draft season have been

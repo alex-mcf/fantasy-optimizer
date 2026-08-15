@@ -45,6 +45,37 @@ class ForecasterTests(unittest.TestCase):
         self.assertEqual(features.loc[0, "lag1_ppg"], 10)
         self.assertNotEqual(features.loc[0, "lag1_ppg"], 99)
 
+    def test_player_metadata_is_derived_at_the_target_year(self):
+        candidate = pd.DataFrame(
+            [{"player": "example", "player_key": "example", "pos": "RB"}]
+        )
+        metadata = pd.DataFrame(
+            [
+                {
+                    "player_key": "example",
+                    "pos": "RB",
+                    "gsis_id": "p1",
+                    "birth_date": pd.Timestamp("2000-01-01"),
+                    "height": 72,
+                    "weight": 210,
+                    "rookie_season": 2023,
+                    "draft_round": 2,
+                    "draft_pick": 50,
+                    "college_name": "Example U",
+                }
+            ]
+        )
+        features = build_features(
+            candidate,
+            pd.DataFrame(),
+            target_year=2025,
+            player_metadata=metadata,
+        )
+        self.assertEqual(features.loc[0, "experience"], 2)
+        self.assertEqual(features.loc[0, "rookie"], 0)
+        self.assertEqual(features.loc[0, "draft_pick"], 50)
+        self.assertAlmostEqual(features.loc[0, "age"], 25.67, places=1)
+
     def test_ridge_model_returns_finite_predictions(self):
         rows = []
         for index in range(20):

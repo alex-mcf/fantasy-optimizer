@@ -11,9 +11,57 @@ from scripts.import_nflverse_results import (
     build_team_position_context,
 )
 from scripts.import_ffc_adp import build_adp_export, write_adp_export
+from scripts.import_nflverse_players import build_player_export
 
 
 class NflverseImporterTests(unittest.TestCase):
+    def test_player_metadata_keeps_supported_position_and_draft_fields(self):
+        players = pd.DataFrame(
+            [
+                {
+                    "gsis_id": "p1",
+                    "display_name": "Example Runner",
+                    "birth_date": "2000-01-01",
+                    "position_group": "RB",
+                    "position": "RB",
+                    "height": 72,
+                    "weight": 210,
+                    "college_name": "Example U",
+                    "rookie_season": 2023,
+                    "last_season": 2026,
+                    "latest_team": "EX",
+                    "status": "ACT",
+                    "years_of_experience": 3,
+                    "draft_year": 2023,
+                    "draft_round": 2,
+                    "draft_pick": 50,
+                    "draft_team": "EX",
+                },
+                {
+                    "gsis_id": "p2",
+                    "display_name": "Example Defender",
+                    "birth_date": "2000-01-01",
+                    "position_group": "DB",
+                    "position": "CB",
+                    "height": 72,
+                    "weight": 200,
+                    "college_name": "Example U",
+                    "rookie_season": 2023,
+                    "last_season": 2026,
+                    "latest_team": "EX",
+                    "status": "ACT",
+                    "years_of_experience": 3,
+                    "draft_year": 2023,
+                    "draft_round": 2,
+                    "draft_pick": 51,
+                    "draft_team": "EX",
+                },
+            ]
+        )
+        result = build_player_export(players)
+        self.assertEqual(result["display_name"].tolist(), ["Example Runner"])
+        self.assertEqual(result.loc[0, "draft_pick"], 50)
+
     def test_half_ppr_matches_fantasypros_interception_scoring(self):
         stats = pd.DataFrame(
             {

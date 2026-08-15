@@ -10,7 +10,10 @@ from fantasyoptimizer.forecasting.forecaster import (
     forecast_season,
     segment_draft_value,
 )
-from fantasyoptimizer.optimizer import build_draft_recommendations
+from fantasyoptimizer.optimizer import (
+    build_draft_recommendations,
+    simulate_historical_draft_strategies,
+)
 from fantasyoptimizer.scoring.scoring_engine import (
     SUPPORTED_POSITIONS,
     compute_player_season_scores,
@@ -56,7 +59,15 @@ def load_forecast(target_year: int, config: LeagueConfig):
     )
     forecast = calibrate_edge_probabilities(forecast, value_players, config)
     segments = segment_draft_value(value_players, config)
-    return forecast, backtest, value_backtest, value_players, segments
+    draft_simulation = simulate_historical_draft_strategies(value_players, config)
+    return (
+        forecast,
+        backtest,
+        value_backtest,
+        value_players,
+        segments,
+        draft_simulation,
+    )
 
 
 year_options = available_years()
@@ -123,6 +134,7 @@ if forecast_years:
                 value_backtest,
                 value_backtest_players,
                 value_segments,
+                draft_simulation,
             ) = load_forecast(
                 target_year, league_config
             )
@@ -185,6 +197,11 @@ if forecast_years:
                 "player",
                 "pos",
                 "team",
+                "age",
+                "experience",
+                "rookie",
+                "draft_round",
+                "draft_pick",
                 "forecast_points",
                 "market_points",
                 "market_adjustment",
@@ -204,6 +221,7 @@ if forecast_years:
                 "adp_avg",
                 "market_rank",
                 "fair_adp",
+                "actionable_adp",
                 "value_gap",
                 "edge_probability",
                 "edge_confidence",
@@ -216,6 +234,11 @@ if forecast_years:
                 "player": "Player",
                 "pos": "Position",
                 "team": "Team",
+                "age": "Age",
+                "experience": "NFL Experience",
+                "rookie": "Rookie",
+                "draft_round": "NFL Draft Round",
+                "draft_pick": "NFL Draft Pick",
                 "forecast_points": "Forecast Points",
                 "market_points": "Market-Implied Points",
                 "market_adjustment": "Predicted Market Error",
@@ -235,6 +258,7 @@ if forecast_years:
                 "adp_avg": "Mock ADP",
                 "market_rank": "Normalized Market Rank",
                 "fair_adp": "Fair ADP",
+                "actionable_adp": "Actionable ADP",
                 "value_gap": "Expected Pick Value",
                 "edge_probability": "Probability Beat ADP %",
                 "edge_confidence": "Edge Confidence",
@@ -341,6 +365,7 @@ if forecast_years:
                 "pos",
                 "team",
                 "fair_adp",
+                "actionable_adp",
                 "adp_avg",
                 "value_gap",
                 "edge_probability",
@@ -355,6 +380,7 @@ if forecast_years:
                 "pos": "Position",
                 "team": "Team",
                 "fair_adp": "Fair ADP",
+                "actionable_adp": "Actionable ADP",
                 "adp_avg": "Mock ADP",
                 "value_gap": "Expected Pick Value",
                 "edge_probability": "Probability Beat ADP %",
@@ -561,6 +587,63 @@ if forecast_years:
                 "Average Actual Rank Surplus"
             ].round(1)
             st.dataframe(segment_display, hide_index=True, width="stretch")
+
+            st.subheader("Historical full-draft simulation")
+            st.caption(
+                "Paired snake-draft simulations use the same draft slot and sampled "
+                "opponent behavior for each policy, then score the best realized "
+                "starting lineup. The actionable policy keeps 75% of ADP and applies "
+                "25% of the model adjustment. Pure model ranking is shown because it "
+                "performed poorly and should not be used as a complete draft board."
+            )
+            simulation_overall = draft_simulation[
+                draft_simulation["year"] == "Overall"
+            ].iloc[0]
+            simulation_metric_1, simulation_metric_2, simulation_metric_3 = st.columns(3)
+            simulation_metric_1.metric(
+                "Actionable-policy lineup lift",
+                f'{simulation_overall["edge_policy_lift"]:+.1f} points',
+            )
+            simulation_metric_2.metric(
+                "Actionable-policy win rate",
+                f'{100 * simulation_overall["edge_policy_win_rate"]:.1f}%',
+            )
+            simulation_metric_3.metric(
+                "Pure-model lineup lift",
+                f'{simulation_overall["pure_model_lift"]:+.1f} points',
+            )
+            simulation_display = draft_simulation.rename(
+                columns={
+                    "year": "Season",
+                    "simulations": "Simulations",
+                    "rounds": "Rounds",
+                    "model_weight": "Model Weight",
+                    "edge_policy_lineup_points": "Actionable Lineup Points",
+                    "pure_model_lineup_points": "Pure Model Lineup Points",
+                    "market_lineup_points": "ADP Lineup Points",
+                    "edge_policy_lift": "Actionable Lift",
+                    "pure_model_lift": "Pure Model Lift",
+                    "edge_policy_win_rate": "Actionable Win Rate %",
+                    "pure_model_win_rate": "Pure Model Win Rate %",
+                    "tie_rate": "Tie Rate %",
+                }
+            )
+            simulation_display["Season"] = simulation_display["Season"].astype(str)
+            for column in [
+                "Actionable Win Rate %",
+                "Pure Model Win Rate %",
+                "Tie Rate %",
+            ]:
+                simulation_display[column] = (100 * simulation_display[column]).round(1)
+            for column in [
+                "Actionable Lineup Points",
+                "Pure Model Lineup Points",
+                "ADP Lineup Points",
+                "Actionable Lift",
+                "Pure Model Lift",
+            ]:
+                simulation_display[column] = simulation_display[column].round(1)
+            st.dataframe(simulation_display, hide_index=True, width="stretch")
             st.download_button(
                 "Download historical value-backtest players",
                 value_backtest_players.to_csv(index=False),

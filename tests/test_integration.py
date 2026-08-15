@@ -42,6 +42,9 @@ class HistoricalPipelineTests(unittest.TestCase):
                     "forecast_points",
                     "market_points",
                     "market_adjustment",
+                    "age",
+                    "experience",
+                    "draft_pick",
                     "forecast_ppg",
                     "forecast_games",
                     "player_only_points",
@@ -49,6 +52,7 @@ class HistoricalPipelineTests(unittest.TestCase):
                     "model_rank",
                     "adp_avg",
                     "value_gap",
+                    "actionable_adp",
                     "edge_probability",
                 ]
             ]

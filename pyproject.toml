@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "fantasyoptimizer"
 version = "0.1.0"
-description = "Forecast fantasy-football value and compare independent model rank with mock ADP."
+description = "Forecast fantasy-football market errors and support evidence-based draft decisions."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

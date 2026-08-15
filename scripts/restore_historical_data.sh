@@ -11,6 +11,7 @@ fi
     2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025
 "$python_bin" "$repo_root/scripts/import_ffc_adp.py" \
     2018 2019 2020 2021 2022 2023 2024 2025 2026
+"$python_bin" "$repo_root/scripts/import_nflverse_players.py"
 "$python_bin" "$repo_root/scripts/validate_data.py"
 
 echo "Consistent historical archive refreshed under $repo_root/data/raw"

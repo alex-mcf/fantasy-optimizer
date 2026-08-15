@@ -2,10 +2,38 @@ import unittest
 
 import pandas as pd
 
-from fantasyoptimizer.optimizer import build_draft_recommendations
+from fantasyoptimizer.config.league_config import LeagueConfig
+from fantasyoptimizer.optimizer import (
+    build_draft_recommendations,
+    simulate_historical_draft_strategies,
+)
 
 
 class DraftRecommendationTests(unittest.TestCase):
+    def test_historical_simulation_compares_all_three_policies(self):
+        rows = []
+        positions = ["QB", "RB", "WR", "TE"] * 4
+        for index, position in enumerate(positions):
+            rows.append(
+                {
+                    "target_year": 2025,
+                    "player": f"player {index}",
+                    "pos": position,
+                    "market_rank": index + 1,
+                    "predicted_rank": 16 - index,
+                    "actual_points": float(200 - index),
+                }
+            )
+        result = simulate_historical_draft_strategies(
+            pd.DataFrame(rows),
+            LeagueConfig(league_size=4, qb=1, rb=1, wr=1, te=1, flex=0),
+            simulations_per_year=5,
+            max_rounds=4,
+            seed=1,
+        )
+        self.assertEqual(result.iloc[-1]["year"], "Overall")
+        self.assertIn("edge_policy_lift", result)
+        self.assertIn("pure_model_lift", result)
     def test_board_distinguishes_urgent_value_from_player_who_can_wait(self):
         forecast = pd.DataFrame(
             [

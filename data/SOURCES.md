@@ -75,6 +75,23 @@ Expected filename:
 data/raw/<year>/Post_<year>_Results(HPPR).csv
 ```
 
+## Player biography and draft metadata
+
+Age, experience, rookie status, height/weight, college, and NFL draft capital
+come from nflverse's maintained players-v2 release. Experience for a forecast
+season is derived from `rookie_season`; the current `years_of_experience` value
+is never copied backward into historical examples.
+
+```bash
+python scripts/import_nflverse_players.py
+```
+
+Expected filename:
+
+```text
+data/raw/players/players.csv
+```
+
 ## Metadata and validation
 
 Every CSV importer writes a neighboring `.meta.json` file containing the source

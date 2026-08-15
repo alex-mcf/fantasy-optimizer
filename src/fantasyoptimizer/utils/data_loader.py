@@ -234,6 +234,41 @@ def build_adp_movement(
     return movement.sort_values("adp_movement", ascending=False, ignore_index=True)
 
 
+def load_player_metadata(
+    data_dir: Path | str = DEFAULT_DATA_DIR,
+) -> pd.DataFrame:
+    path = Path(data_dir) / "players" / "players.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    frame = _read_csv(path)
+    frame.columns = frame.columns.str.strip().str.lower()
+    frame = frame.rename(
+        columns={
+            "display_name": "player",
+            "position_group": "pos",
+        }
+    )
+    frame["player"] = frame["player"].astype("string").str.strip().str.lower()
+    frame["player_key"] = _normalize_player_key(frame["player"])
+    frame["pos"] = _normalize_position(frame["pos"])
+    numeric = [
+        "height",
+        "weight",
+        "rookie_season",
+        "last_season",
+        "years_of_experience",
+        "draft_year",
+        "draft_round",
+        "draft_pick",
+    ]
+    for column in numeric:
+        if column in frame:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+    if "birth_date" in frame:
+        frame["birth_date"] = pd.to_datetime(frame["birth_date"], errors="coerce")
+    return frame
+
+
 # Load results data for a given year
 def load_results(year: int, data_dir: Path | str = DEFAULT_DATA_DIR) -> pd.DataFrame:
     path = Path(data_dir) / str(year) / f"Post_{year}_Results(HPPR).csv"
