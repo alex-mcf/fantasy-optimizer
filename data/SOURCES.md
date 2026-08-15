@@ -45,6 +45,15 @@ exposes years back to 2015, but logged-out responses contain only five players,
 so it is not the reproducible primary archive. Its underlying source mix also
 changes by season.
 
+## User-supplied draft-platform ADP
+
+The live draft board can accept a current ESPN, Yahoo, Sleeper, NFL.com, or
+custom ranking CSV. Uploaded rankings are session inputs, not historical
+training data. The normalized export must contain a player/name field and an
+ADP/rank field; position and standard deviation are optional. Matched platform
+prices drive live availability and value comparisons, while unmatched players
+are labeled and fall back to the reproducible FFC market.
+
 ## Completed results: 2015–2025
 
 All results are generated from the open
@@ -98,6 +107,33 @@ Expected filename:
 data/raw/players/players.csv
 ```
 
+## Official preseason role snapshot
+
+Current depth rank and starter designation come from the official nflverse
+[depth-chart release](https://github.com/nflverse/nflverse-data/releases/tag/depth_charts),
+which is sourced from ESPN from 2025 onward. Roster status comes from nflverse's
+weekly-roster release. The importer selects the last dated depth snapshot no
+later than the final date represented by the season's ADP sample.
+
+```bash
+python scripts/import_nflverse_roles.py 2026
+```
+
+Expected filename:
+
+```text
+data/raw/<year>/Preseason_Role_<year>.csv
+```
+
+This information is currently displayed but not used as a forecast feature.
+The source changed after 2024: older depth charts identify an NFL week but do
+not provide the collection timestamp needed to prove they preceded the matching
+ADP sample. Treating those opening-week files as preseason knowledge could leak
+final cuts or late news into a backtest.
+
+Each refresh also preserves an immutable `Role_<timestamp>.csv` copy under the
+season's `snapshots/` directory so role movement can be audited prospectively.
+
 ## Metadata and validation
 
 Every CSV importer writes a neighboring `.meta.json` file containing the source
@@ -119,6 +155,9 @@ rates.
   concrete for the provider's recorded sample, not a universal player value.
 - Same-team position ADP rank is calculated from that observed sample. It is a
   modeled market feature, not concrete evidence of the team's depth-chart order.
+- Imported depth rank and roster status are observed source fields at the saved
+  snapshot. Their use as evidence about future workload would still be a modeling
+  assumption; they are not currently included in the prediction.
 - Team-position history is observed production, but treating it as evidence for
   next season's role is a modeling assumption.
 - Market-implied points use current ADP and its mock-sample uncertainty.

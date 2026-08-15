@@ -23,6 +23,7 @@ Raw data is intentionally excluded from Git. Build the complete local archive:
 python scripts/import_nflverse_results.py 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025
 python scripts/import_ffc_adp.py 2018 2019 2020 2021 2022 2023 2024 2025 2026
 python scripts/import_nflverse_players.py
+python scripts/import_nflverse_roles.py 2026
 python scripts/validate_data.py
 ```
 
@@ -99,11 +100,31 @@ TE environments independently of the current player name, then shows which
 current candidate the model prefers for that role. The player table displays a
 player-only forecast, contextual forecast, and the difference between them.
 
+An optional official-role import adds the latest depth rank, starter flag, and
+weekly roster status to the current forecast and live draft board. The importer
+selects the last dated depth-chart snapshot no later than the ADP sample's end
+date. These fields are explanatory only: the upstream source changed after 2024,
+and older files lack timestamps that prove alignment with historical ADP, so the
+forecast does not train on them yet.
+
 The live draft decision board accepts the current pick, next pick, drafted
 players, and roster counts. It estimates whether each available player will
 survive to the next selection using mock-draft variability, then labels choices
 as draft now, consider now, target while waiting, wait, or pass. This is an
 auditable heuristic.
+
+The draft-room sidebar now controls league size, starting roster, superflex,
+draft slot, and total snake-draft rounds. Snake selections are calculated from
+the user's slot, with manual pick-number overrides for keepers or traded picks.
+The supported scoring definition remains half-PPR; changing roster settings
+changes replacement value, not the underlying historical scoring data.
+
+Fantasy Football Calculator remains the consistent market used to train and
+backtest the predictor. For ESPN, Yahoo, Sleeper, NFL.com, or another draft room,
+the user can upload a current CSV containing a player/name column and ADP/rank
+column. The selected platform then controls live cost, platform value gap,
+actionable ADP, and next-pick availability. Unmatched players are visibly marked
+as FFC fallbacks rather than silently dropped.
 
 Paired historical snake-draft simulations now compare ADP-only drafting, pure
 model drafting, and the actionable policy. The actionable policy deliberately
@@ -116,7 +137,8 @@ but omit waivers and weekly start/sit decisions.
 Every ADP refresh now preserves an immutable timestamped copy under that
 season's `snapshots/` folder. Once multiple points in the draft season have been
 collected, those snapshots can train and validate a separate closing-ADP
-movement model.
+movement model. Official-role refreshes preserve timestamped copies in the same
+folder so depth-chart changes can be audited without overwriting prior states.
 
 ## Historical score
 

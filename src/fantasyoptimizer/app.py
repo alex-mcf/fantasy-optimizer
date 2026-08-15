@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 
 from fantasyoptimizer.config.league_config import LeagueConfig
@@ -10,9 +11,11 @@ from fantasyoptimizer.forecasting.forecaster import (
     forecast_season,
     segment_draft_value,
 )
+from fantasyoptimizer.market import PLATFORM_OPTIONS, apply_platform_adp, parse_platform_adp
 from fantasyoptimizer.optimizer import (
     build_draft_recommendations,
     simulate_historical_draft_strategies,
+    snake_pick_numbers,
 )
 from fantasyoptimizer.scoring.scoring_engine import (
     SUPPORTED_POSITIONS,
@@ -76,16 +79,58 @@ if not year_options:
     st.stop()
 
 with st.sidebar:
-    st.header("Analysis settings")
-    years = st.multiselect("Seasons", options=year_options, default=year_options)
-    st.subheader("League roster")
+    st.header("Draft room setup")
+    platform = st.selectbox("Draft platform", PLATFORM_OPTIONS)
+    st.selectbox("Scoring format", ["Half-PPR (validated)"])
     league_size = st.number_input("Teams", min_value=4, max_value=20, value=12)
+    draft_slot = st.number_input(
+        "Your draft slot", min_value=1, max_value=int(league_size), value=1
+    )
+    draft_rounds = st.number_input(
+        "Draft rounds", min_value=5, max_value=30, value=15
+    )
+    platform_adp = None
+    if platform != PLATFORM_OPTIONS[0]:
+        st.caption(
+            "Upload your platform's current ranking export. Unmatched players "
+            "fall back to the consistent FFC market."
+        )
+        platform_file = st.file_uploader(
+            f"{platform} rankings CSV", type=["csv"], key="platform_adp"
+        )
+        st.download_button(
+            "Download upload template",
+            "Player,Position,ADP\nExample Player,RB,24.5\n",
+            file_name="platform_adp_template.csv",
+            mime="text/csv",
+        )
+        if platform_file is not None:
+            try:
+                platform_adp = parse_platform_adp(pd.read_csv(platform_file))
+                st.success(f"Loaded {len(platform_adp)} platform rankings.")
+            except (ValueError, pd.errors.ParserError) as error:
+                st.error(str(error))
+
+    st.subheader("Starting lineup")
     qb = st.number_input("Starting QB", min_value=0, max_value=3, value=1)
     rb = st.number_input("Starting RB", min_value=0, max_value=5, value=2)
     wr = st.number_input("Starting WR", min_value=0, max_value=5, value=2)
     te = st.number_input("Starting TE", min_value=0, max_value=3, value=1)
     flex = st.number_input("FLEX", min_value=0, max_value=4, value=1)
     superflex = st.number_input("Superflex", min_value=0, max_value=2, value=0)
+    st.caption("Kickers and defenses are not currently modeled.")
+    if int(league_size) != 12:
+        st.warning(
+            "Replacement value will adjust to this league size, but the historical "
+            "FFC market baseline is from 12-team drafts."
+        )
+    if int(superflex) > 0 and platform == PLATFORM_OPTIONS[0]:
+        st.warning(
+            "FFC baseline ADP is not superflex ADP. Upload your superflex platform "
+            "rankings for useful draft-room prices and availability."
+        )
+    with st.expander("Historical evaluation settings"):
+        years = st.multiselect("Seasons", options=year_options, default=year_options)
 
 if not years:
     st.warning("Select at least one complete season.")
@@ -138,19 +183,42 @@ if forecast_years:
             ) = load_forecast(
                 target_year, league_config
             )
+        forecast = apply_platform_adp(forecast, platform_adp, platform)
+        platform_matches = int(forecast["platform_match"].sum())
 
-        st.subheader(f"{target_year} model value versus mock ADP")
+        st.subheader(f"{target_year} model value versus {platform} ADP")
         st.caption(
             f"Market snapshot fetched: {adp_fetched_at} · Preserved snapshots: "
             f"{snapshot_count}"
         )
         st.caption(
-            "Positive value gap means the model's fair ADP is earlier than the "
-            "normalized mock market. The model starts from ADP, then adjusts it "
+            "Positive platform value gap means the model's fair ADP is earlier "
+            "than the selected platform market. The model starts from consistent "
+            "FFC ADP, then adjusts it "
             "with player ability, role, destination context, and availability. "
             "Room fields are derived from the ADP pool; they are not an official "
             "NFL depth chart."
         )
+        st.caption(
+            f"Selected-platform coverage: {platform_matches}/{len(forecast)}. "
+            "The model remains trained on consistent FFC history; selected-platform "
+            "ADP controls live price and availability."
+        )
+        role_coverage = int(forecast["official_role_known"].sum())
+        if role_coverage:
+            role_snapshot = forecast.loc[
+                forecast["official_role_known"].eq(1), "official_role_snapshot"
+            ].iloc[0]
+            st.caption(
+                f"Official role snapshot: {role_snapshot} · matched {role_coverage}/"
+                f"{len(forecast)} players. It is displayed for draft decisions but "
+                "is not yet a trained model input."
+            )
+        else:
+            st.caption(
+                f"Official {target_year} role data is not installed. Run "
+                f"`python scripts/import_nflverse_roles.py {target_year}`."
+            )
         fc_search_col, fc_position_col, fc_confidence_col = st.columns([3, 1, 1])
         fc_search = fc_search_col.text_input(
             "Forecast player search", placeholder="Player name"
@@ -174,19 +242,23 @@ if forecast_years:
                 forecast_filtered["confidence"] == fc_confidence
             ]
 
-        value_count = int((forecast_filtered["value_gap"] >= league_size).sum())
+        value_count = int(
+            (forecast_filtered["platform_value_gap"] >= league_size).sum()
+        )
         metric_1, metric_2, metric_3 = st.columns(3)
         metric_1.metric("Players modeled", len(forecast_filtered))
-        metric_2.metric("Model ≥1 round earlier", value_count)
+        metric_2.metric("Platform values ≥1 round", value_count)
         metric_3.metric("Training result seasons", len(year_options))
 
         chart = forecast_filtered[
-            ["player", "pos", "adp_avg", "model_rank"]
-        ].rename(columns={"adp_avg": "Mock ADP", "model_rank": "Model Rank"})
+            ["player", "pos", "draft_adp", "model_rank"]
+        ].rename(
+            columns={"draft_adp": "Selected Platform ADP", "model_rank": "Model Rank"}
+        )
         if not chart.empty:
             st.scatter_chart(
                 chart,
-                x="Mock ADP",
+                x="Selected Platform ADP",
                 y="Model Rank",
                 color="pos",
                 size=40,
@@ -224,11 +296,22 @@ if forecast_years:
                 "market_room_size",
                 "market_room_leader",
                 "market_room_adp_gap",
+                "official_depth_rank",
+                "official_starter",
+                "official_roster_status",
+                "official_depth_position",
+                "role_agreement",
                 "adp_avg",
                 "market_rank",
                 "fair_adp",
                 "actionable_adp",
                 "value_gap",
+                "draft_platform",
+                "draft_adp",
+                "draft_market_rank",
+                "platform_actionable_adp",
+                "platform_value_gap",
+                "platform_source",
                 "edge_probability",
                 "edge_confidence",
                 "timesdrafted",
@@ -265,11 +348,22 @@ if forecast_years:
                 "market_room_size": "Same-Team Position ADP Candidates",
                 "market_room_leader": "Room ADP Leader",
                 "market_room_adp_gap": "ADP Picks Behind Room Leader",
+                "official_depth_rank": "Official Depth Rank",
+                "official_starter": "Official Starter",
+                "official_roster_status": "Official Roster Status",
+                "official_depth_position": "Official Depth Position",
+                "role_agreement": "Market / Depth Agreement",
                 "adp_avg": "Mock ADP",
                 "market_rank": "Normalized Market Rank",
                 "fair_adp": "Fair ADP",
                 "actionable_adp": "Actionable ADP",
                 "value_gap": "Expected Pick Value",
+                "draft_platform": "Selected Platform",
+                "draft_adp": "Selected Platform ADP",
+                "draft_market_rank": "Selected Platform Market Rank",
+                "platform_actionable_adp": "Platform Actionable ADP",
+                "platform_value_gap": "Platform Value Gap",
+                "platform_source": "Platform Data Source",
                 "edge_probability": "Probability Beat ADP %",
                 "edge_confidence": "Edge Confidence",
                 "timesdrafted": "Mock Samples",
@@ -284,6 +378,42 @@ if forecast_years:
             100 * forecast_display["Probability Beat ADP %"]
         ).round(0)
         st.dataframe(forecast_display, hide_index=True, width="stretch")
+        if role_coverage:
+            with st.expander("Market / official role disagreements"):
+                disagreements = forecast_filtered[
+                    forecast_filtered["official_role_known"].eq(1)
+                    & forecast_filtered["role_agreement"].ne("Aligned")
+                ][
+                    [
+                        "player",
+                        "pos",
+                        "team",
+                        "market_room_rank",
+                        "official_depth_rank",
+                        "official_starter",
+                        "official_roster_status",
+                        "role_agreement",
+                        "draft_adp",
+                        "platform_actionable_adp",
+                        "platform_source",
+                    ]
+                ].rename(
+                    columns={
+                        "player": "Player",
+                        "pos": "Position",
+                        "team": "Team",
+                        "market_room_rank": "ADP Room Rank",
+                        "official_depth_rank": "Official Depth Rank",
+                        "official_starter": "Official Starter",
+                        "official_roster_status": "Roster Status",
+                        "role_agreement": "Disagreement",
+                        "draft_adp": f"{platform} ADP",
+                        "platform_actionable_adp": "Actionable ADP",
+                        "platform_source": "ADP Source",
+                    }
+                )
+                disagreements["Player"] = disagreements["Player"].str.title()
+                st.dataframe(disagreements, hide_index=True, width="stretch")
         st.download_button(
             f"Download {target_year} forecast",
             forecast_display.to_csv(index=False),
@@ -325,22 +455,44 @@ if forecast_years:
 
         st.subheader("Live draft decision board")
         st.caption(
-            "Enter the current and next selection, then mark drafted players. The "
-            "board distinguishes players to take now from values likely to survive "
-            "until your next turn. Availability uses mock-pick variability and is "
-            "an estimate, not a guarantee."
+            "Choose your current round or manually enter traded/keeper pick numbers, "
+            "then mark drafted players. Availability uses selected-platform ADP when "
+            "uploaded and is an estimate, not a guarantee."
         )
-        pick_col, next_col = st.columns(2)
-        current_pick = int(
-            pick_col.number_input("Current overall pick", min_value=1, value=1)
-        )
-        next_pick = int(
-            next_col.number_input(
-                "Your next overall pick",
-                min_value=current_pick + 1,
-                value=max(current_pick + 1, 2 * league_size),
+        manual_picks = st.toggle("Manually enter pick numbers", value=False)
+        if manual_picks:
+            pick_col, next_col = st.columns(2)
+            current_pick = int(
+                pick_col.number_input("Current overall pick", min_value=1, value=1)
             )
-        )
+            next_pick = int(
+                next_col.number_input(
+                    "Your next overall pick",
+                    min_value=current_pick + 1,
+                    value=max(current_pick + 1, 2 * league_size),
+                )
+            )
+        else:
+            current_round = int(
+                st.number_input(
+                    "Your current round",
+                    min_value=1,
+                    max_value=int(draft_rounds),
+                    value=1,
+                )
+            )
+            snake_picks = snake_pick_numbers(
+                int(league_size), int(draft_slot), int(draft_rounds)
+            )
+            current_pick = snake_picks[current_round - 1]
+            next_pick = (
+                snake_picks[current_round]
+                if current_round < len(snake_picks)
+                else current_pick + int(league_size)
+            )
+            pick_col, next_col = st.columns(2)
+            pick_col.metric("Your current overall pick", current_pick)
+            next_col.metric("Your next overall pick", next_pick)
         drafted_players = st.multiselect(
             "Players already drafted",
             options=forecast["player"].tolist(),
@@ -377,10 +529,15 @@ if forecast_years:
                 "market_room_rank",
                 "market_room_size",
                 "market_room_adp_gap",
+                "official_depth_rank",
+                "official_starter",
+                "official_roster_status",
+                "role_agreement",
                 "fair_adp",
-                "actionable_adp",
-                "adp_avg",
-                "value_gap",
+                "platform_actionable_adp",
+                "draft_adp",
+                "platform_value_gap",
+                "platform_source",
                 "edge_probability",
                 "available_next_pick_probability",
                 "forecast_points",
@@ -395,10 +552,15 @@ if forecast_years:
                 "market_room_rank": "Room ADP Rank",
                 "market_room_size": "ADP Room Candidates",
                 "market_room_adp_gap": "Picks Behind Room Leader",
+                "official_depth_rank": "Official Depth Rank",
+                "official_starter": "Official Starter",
+                "official_roster_status": "Roster Status",
+                "role_agreement": "Market / Depth Agreement",
                 "fair_adp": "Fair ADP",
-                "actionable_adp": "Actionable ADP",
-                "adp_avg": "Mock ADP",
-                "value_gap": "Expected Pick Value",
+                "platform_actionable_adp": "Actionable ADP",
+                "draft_adp": f"{platform} ADP",
+                "platform_value_gap": "Platform Value Gap",
+                "platform_source": "ADP Source",
                 "edge_probability": "Probability Beat ADP %",
                 "available_next_pick_probability": "Available Next Pick %",
                 "forecast_points": "Forecast Points",

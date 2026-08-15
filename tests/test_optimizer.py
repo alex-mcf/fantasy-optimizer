@@ -6,10 +6,38 @@ from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.optimizer import (
     build_draft_recommendations,
     simulate_historical_draft_strategies,
+    snake_pick_numbers,
 )
 
 
 class DraftRecommendationTests(unittest.TestCase):
+    def test_snake_pick_numbers_follow_slot_each_round(self):
+        self.assertEqual(snake_pick_numbers(12, 3, 4), [3, 22, 27, 46])
+
+    def test_board_uses_selected_platform_adp_for_availability(self):
+        forecast = pd.DataFrame(
+            [
+                {
+                    "player": "platform bargain",
+                    "pos": "RB",
+                    "team": "A",
+                    "adp_avg": 20.0,
+                    "draft_adp": 80.0,
+                    "draft_adp_stddev": 4.0,
+                    "fair_adp": 30,
+                    "platform_actionable_adp": 42,
+                    "model_rank": 30,
+                    "value_gap": 0,
+                    "platform_value_gap": 50,
+                    "model_value": 50.0,
+                    "forecast_points": 200.0,
+                }
+            ]
+        )
+        board = build_draft_recommendations(forecast, 24, 48)
+        self.assertGreater(board.loc[0, "available_next_pick_probability"], 0.99)
+        self.assertEqual(board.loc[0, "recommendation"], "Target — may wait")
+
     def test_historical_simulation_compares_all_three_policies(self):
         rows = []
         positions = ["QB", "RB", "WR", "TE"] * 4

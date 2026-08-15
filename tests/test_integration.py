@@ -64,6 +64,8 @@ class HistoricalPipelineTests(unittest.TestCase):
             .any()
         )
         self.assertTrue(forecast["model_rank"].is_monotonic_increasing)
+        self.assertIn("official_depth_rank", forecast)
+        self.assertIn("role_agreement", forecast)
         self.assertFalse(backtest.empty)
         self.assertLess(int(backtest["year"].max()), 2026)
         self.assertFalse(value_backtest.empty)

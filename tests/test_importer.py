@@ -12,9 +12,94 @@ from scripts.import_nflverse_results import (
 )
 from scripts.import_ffc_adp import build_adp_export, write_adp_export
 from scripts.import_nflverse_players import build_player_export
+from scripts.import_nflverse_roles import (
+    adp_cutoff,
+    build_depth_export,
+    build_role_export,
+    write_role_export,
+)
 
 
 class NflverseImporterTests(unittest.TestCase):
+    def test_dated_depth_chart_uses_last_snapshot_before_adp_cutoff(self):
+        depth = pd.DataFrame(
+            [
+                {
+                    "dt": "2026-08-14T08:00:00Z",
+                    "team": "EX",
+                    "player_name": "Example Receiver",
+                    "gsis_id": "p1",
+                    "pos_abb": "WR",
+                    "pos_slot": 1,
+                    "pos_rank": 3,
+                    "pos_name": "Wide Receiver",
+                },
+                {
+                    "dt": "2026-08-15T08:00:00Z",
+                    "team": "EX",
+                    "player_name": "Example Receiver",
+                    "gsis_id": "p1",
+                    "pos_abb": "WR",
+                    "pos_slot": 1,
+                    "pos_rank": 4,
+                    "pos_name": "Wide Receiver",
+                },
+            ]
+        )
+        cutoff = adp_cutoff({"source_meta": {"end_date": "2026-08-14"}})
+        result, metadata = build_depth_export(depth, 2026, cutoff)
+        self.assertEqual(result.loc[0, "depth_rank"], 3)
+        self.assertEqual(result.loc[0, "official_starter"], 1)
+        self.assertEqual(metadata["timing_quality"], "adp_aligned")
+        self.assertTrue(metadata["point_in_time_eligible"])
+
+    def test_role_export_joins_week_one_roster_status(self):
+        depth = pd.DataFrame(
+            [
+                {
+                    "dt": "2026-08-14T08:00:00Z",
+                    "team": "EX",
+                    "player_name": "Example Runner",
+                    "gsis_id": "p1",
+                    "pos_abb": "RB",
+                    "pos_slot": 11,
+                    "pos_rank": 1,
+                    "pos_name": "Running Back",
+                }
+            ]
+        )
+        roster = pd.DataFrame(
+            [
+                {
+                    "season": 2026,
+                    "team": "EX",
+                    "position": "RB",
+                    "full_name": "Example Runner",
+                    "gsis_id": "p1",
+                    "week": 1,
+                    "game_type": "REG",
+                    "status": "ACT",
+                    "status_description_abbr": "Active",
+                }
+            ]
+        )
+        result, _ = build_role_export(depth, roster, 2026)
+        self.assertEqual(result.loc[0, "roster_status"], "ACT")
+
+    def test_role_import_preserves_timestamped_snapshot(self):
+        role = pd.DataFrame([{"player": "Example Runner", "pos": "RB"}])
+        metadata = {
+            "fetched_at_utc": datetime(
+                2026, 8, 14, tzinfo=timezone.utc
+            ).isoformat()
+        }
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "2026" / "Preseason_Role_2026.csv"
+            snapshot = write_role_export(role, destination, metadata)
+            self.assertTrue(destination.exists())
+            self.assertTrue(snapshot.exists())
+            self.assertTrue(snapshot.with_suffix(".meta.json").exists())
+
     def test_player_metadata_keeps_supported_position_and_draft_fields(self):
         players = pd.DataFrame(
             [

@@ -269,6 +269,40 @@ def load_player_metadata(
     return frame
 
 
+def load_preseason_roles(
+    year: int, data_dir: Path | str = DEFAULT_DATA_DIR
+) -> pd.DataFrame:
+    """Load an optional official preseason role snapshot for display/auditing."""
+    path = Path(data_dir) / str(year) / f"Preseason_Role_{year}.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    frame = _read_csv(path)
+    frame.columns = frame.columns.str.strip().str.lower()
+    required = {
+        "team",
+        "player",
+        "gsis_id",
+        "pos",
+        "depth_rank",
+        "official_starter",
+        "roster_status",
+        "snapshot_at",
+        "timing_quality",
+    }
+    missing = required.difference(frame.columns)
+    if missing:
+        raise ValueError(f"Preseason role data is missing: {sorted(missing)}")
+    frame["player"] = frame["player"].astype("string").str.strip().str.lower()
+    frame["player_key"] = _normalize_player_key(frame["player"])
+    frame["team"] = _normalize_team(frame["team"])
+    frame["pos"] = _normalize_position(frame["pos"])
+    frame["depth_rank"] = pd.to_numeric(frame["depth_rank"], errors="coerce")
+    frame["official_starter"] = pd.to_numeric(
+        frame["official_starter"], errors="coerce"
+    ).fillna(0).astype(int)
+    return frame
+
+
 # Load results data for a given year
 def load_results(year: int, data_dir: Path | str = DEFAULT_DATA_DIR) -> pd.DataFrame:
     path = Path(data_dir) / str(year) / f"Post_{year}_Results(HPPR).csv"

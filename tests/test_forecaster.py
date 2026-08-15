@@ -7,12 +7,50 @@ from fantasyoptimizer.forecasting.forecaster import (
     MarketResidualModel,
     RidgeModel,
     add_market_features,
+    add_official_role_context,
     build_features,
     calibrate_edge_probabilities,
 )
 
 
 class ForecasterTests(unittest.TestCase):
+    def test_official_role_context_is_explanatory_and_matches_by_id(self):
+        forecast = pd.DataFrame(
+            [
+                {
+                    "player": "example runner",
+                    "player_key": "examplerunner",
+                    "gsis_id": "p1",
+                    "team": "EX",
+                    "pos": "RB",
+                    "market_room_rank": 2,
+                }
+            ]
+        )
+        roles = pd.DataFrame(
+            [
+                {
+                    "player_key": "differentname",
+                    "gsis_id": "p1",
+                    "team": "EX",
+                    "pos": "RB",
+                    "depth_rank": 1,
+                    "official_starter": 1,
+                    "roster_status": "ACT",
+                    "roster_status_description": "Active",
+                    "depth_position": "Running Back",
+                    "snapshot_at": "2026-08-14T08:00:00Z",
+                    "timing_quality": "adp_aligned",
+                }
+            ]
+        )
+        enriched = add_official_role_context(forecast, roles)
+        self.assertEqual(enriched.loc[0, "official_depth_rank"], 1)
+        self.assertEqual(enriched.loc[0, "official_role_known"], 1)
+        self.assertEqual(
+            enriched.loc[0, "role_agreement"], "Depth chart ahead of market"
+        )
+
     def test_features_never_use_target_or_future_results(self):
         candidate = pd.DataFrame(
             [{"player": "example", "player_key": "example", "pos": "RB"}]

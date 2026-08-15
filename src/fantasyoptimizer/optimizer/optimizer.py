@@ -48,14 +48,16 @@ def build_draft_recommendations(
     if board.empty:
         return board
 
-    deviation = (
-        board["stddev"]
-        if "stddev" in board
-        else pd.Series(12.0, index=board.index)
+    adp_column = "draft_adp" if "draft_adp" in board else "adp_avg"
+    deviation_column = (
+        "draft_adp_stddev" if "draft_adp_stddev" in board else "stddev"
+    )
+    deviation = board.get(
+        deviation_column, pd.Series(12.0, index=board.index)
     ).fillna(12.0)
     board["available_next_pick_probability"] = [
         _available_next_pick(adp, spread, next_pick)
-        for adp, spread in zip(board["adp_avg"], deviation)
+        for adp, spread in zip(board[adp_column], deviation)
     ]
     board["drafted_before_next_probability"] = (
         1 - board["available_next_pick_probability"]
@@ -72,18 +74,21 @@ def build_draft_recommendations(
         if "edge_probability" in board
         else pd.Series(0.5, index=board.index)
     ).fillna(0.5)
+    value_gap = board.get("platform_value_gap", board["value_gap"])
     board["decision_score"] = (
         board["model_value"]
-        + 0.35 * board["value_gap"]
+        + 0.35 * value_gap
         + 12 * (edge_probability - 0.5)
         + 6 * board["remaining_starter_need"]
         + 8 * board["drafted_before_next_probability"]
     )
 
     urgent = board["available_next_pick_probability"] < 0.35
-    strong_edge = board["value_gap"] >= config.league_size
+    strong_edge = value_gap >= config.league_size
     decision_rank = (
-        board["actionable_adp"] if "actionable_adp" in board else board["fair_adp"]
+        board["platform_actionable_adp"]
+        if "platform_actionable_adp" in board
+        else board.get("actionable_adp", board["fair_adp"])
     )
     fair_now = decision_rank <= current_pick
     fair_before_next = decision_rank < next_pick
@@ -110,6 +115,20 @@ def build_draft_recommendations(
         ascending=[True, False, True],
         ignore_index=True,
     )
+
+
+def snake_pick_numbers(
+    league_size: int, draft_slot: int, rounds: int
+) -> list[int]:
+    """Return a team's one-indexed overall selections in a snake draft."""
+    if league_size <= 0 or not 1 <= draft_slot <= league_size or rounds <= 0:
+        raise ValueError("League size, draft slot, and rounds must be positive.")
+    return [
+        (round_number - 1) * league_size + draft_slot
+        if round_number % 2 == 1
+        else round_number * league_size - draft_slot + 1
+        for round_number in range(1, rounds + 1)
+    ]
 
 
 def _position_caps(config: LeagueConfig) -> dict[str, int]:

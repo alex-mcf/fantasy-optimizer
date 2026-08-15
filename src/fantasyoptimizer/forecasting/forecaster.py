@@ -16,6 +16,7 @@ from fantasyoptimizer.utils.data_loader import (
     available_result_years,
     load_adp,
     load_player_metadata,
+    load_preseason_roles,
     load_results,
     load_player_team_context,
     load_team_position_context,
@@ -190,6 +191,89 @@ def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
     featured["market_log_samples"] = np.log1p(samples.fillna(0).clip(lower=0))
     featured["market_stddev"] = deviation.fillna(0).clip(lower=0)
     featured["market_range"] = (low - high).fillna(0).clip(lower=0)
+    return featured
+
+
+def add_official_role_context(
+    frame: pd.DataFrame, roles: pd.DataFrame | None
+) -> pd.DataFrame:
+    """Attach current official role evidence without using it as a model feature."""
+    featured = frame.copy()
+    defaults: dict[str, object] = {
+        "official_role_known": 0,
+        "official_depth_rank": np.nan,
+        "official_starter": 0,
+        "official_roster_status": "Unknown",
+        "official_roster_status_description": "",
+        "official_depth_position": "",
+        "official_role_snapshot": "",
+        "official_role_timing": "unavailable",
+        "depth_market_gap": np.nan,
+        "role_agreement": "Official role unavailable",
+    }
+    for column, value in defaults.items():
+        featured[column] = value
+    if roles is None or roles.empty:
+        return featured
+
+    role_records = roles.sort_values("depth_rank").to_dict("records")
+    by_id = {
+        (_text_or_empty(row.get("gsis_id")), row["team"], row["pos"]): row
+        for row in role_records
+        if _text_or_empty(row.get("gsis_id"))
+    }
+    by_name = {
+        (row["player_key"], row["team"], row["pos"]): row
+        for row in role_records
+    }
+    for index, candidate in featured.iterrows():
+        identity = (
+            _text_or_empty(candidate.get("gsis_id")),
+            candidate.get("team", ""),
+            candidate.get("pos", ""),
+        )
+        role = by_id.get(identity)
+        if role is None:
+            role = by_name.get(
+                (
+                    candidate.get("player_key", ""),
+                    candidate.get("team", ""),
+                    candidate.get("pos", ""),
+                )
+            )
+        if role is None:
+            continue
+        depth_rank = float(role["depth_rank"])
+        market_rank = float(candidate.get("market_room_rank", 1))
+        gap = market_rank - depth_rank
+        if abs(gap) < 0.5:
+            agreement = "Aligned"
+        elif gap > 0:
+            agreement = "Depth chart ahead of market"
+        else:
+            agreement = "Market ahead of depth chart"
+        values = {
+            "official_role_known": 1,
+            "official_depth_rank": depth_rank,
+            "official_starter": int(role.get("official_starter", 0)),
+            "official_roster_status": _text_or_empty(
+                role.get("roster_status", "Unknown")
+            ) or "Unknown",
+            "official_roster_status_description": _text_or_empty(
+                role.get("roster_status_description", "")
+            ),
+            "official_depth_position": _text_or_empty(
+                role.get("depth_position", "")
+            ),
+            "official_role_snapshot": _text_or_empty(role.get("snapshot_at", "")),
+            "official_role_timing": _text_or_empty(
+                role.get("timing_quality", "unavailable")
+            ),
+            "depth_market_gap": gap,
+            "role_agreement": agreement,
+        }
+        for column, value in values.items():
+            featured.at[index, column] = value
     return featured
 
 
@@ -866,6 +950,9 @@ def forecast_season(
     )
     # Retain point-in-time market hierarchy fields for explanations in the UI.
     features = add_market_features(features)
+    features = add_official_role_context(
+        features, load_preseason_roles(target_year, data_dir)
+    )
     point_components = model.predict_components(features)
     features["market_points"] = np.clip(
         point_components["market_prediction"], 0, 500
