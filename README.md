@@ -14,7 +14,7 @@ Python 3.10 or newer is required.
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install .
+python -m pip install -e .
 ```
 
 Raw data is intentionally excluded from Git. Build the complete local archive:
@@ -57,12 +57,15 @@ points and opportunities with the candidate removed). The subtraction applies
 whether the player stayed or changed teams.
 
 ADP is treated as a strong market baseline instead of discarded. Separate
-position-specific ridge models estimate the production implied by ADP, then a
-heavily regularized player/role/context model predicts the market's residual
-error. Separate models estimate points per game and games played so performance
-and availability are visible even though direct season points remain the primary
-ranking target. League-specific replacement levels convert the adjusted point
-forecast into VORP and fair ADP:
+position-specific ridge models estimate the production implied by ADP. That
+market layer also measures each player's ADP rank and distance from the ADP
+leader among current same-team, same-position candidates, providing a
+historically reconstructible role-competition signal. A heavily regularized
+player/role/context model then predicts the market's residual error. Separate
+models estimate points per game and games played so performance and availability
+are visible even though direct season points remain the primary ranking target.
+League-specific replacement levels convert the adjusted point forecast into
+VORP and fair ADP:
 
 ```text
 expected pick value = normalized market rank - fair ADP
@@ -86,7 +89,7 @@ same season and ADP round. Model-versus-market rank error and the rate at which 
 model override was closer to reality are shown as stricter checks. Historical
 player-level results can be downloaded for inspection.
 
-The residual regularization was selected while developing against these
+The regularization was selected while developing against these
 historical seasons. The splits are chronological and player outcomes never leak
 backward, but the aggregate should still be treated as development evidence;
 2026 is the first untouched prospective test of the finalized specification.

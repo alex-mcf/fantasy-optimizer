@@ -147,7 +147,9 @@ if forecast_years:
         st.caption(
             "Positive value gap means the model's fair ADP is earlier than the "
             "normalized mock market. The model starts from ADP, then adjusts it "
-            "with player ability, role, destination context, and availability."
+            "with player ability, role, destination context, and availability. "
+            "Room fields are derived from the ADP pool; they are not an official "
+            "NFL depth chart."
         )
         fc_search_col, fc_position_col, fc_confidence_col = st.columns([3, 1, 1])
         fc_search = fc_search_col.text_input(
@@ -218,6 +220,10 @@ if forecast_years:
                 "team_pos_other_weighted_points",
                 "same_team_last_year",
                 "changed_team",
+                "market_room_rank",
+                "market_room_size",
+                "market_room_leader",
+                "market_room_adp_gap",
                 "adp_avg",
                 "market_rank",
                 "fair_adp",
@@ -255,6 +261,10 @@ if forecast_years:
                 "team_pos_other_weighted_points": "3-Year Teammate Points",
                 "same_team_last_year": "Same Team",
                 "changed_team": "Changed Team",
+                "market_room_rank": "Same-Team Position ADP Rank",
+                "market_room_size": "Same-Team Position ADP Candidates",
+                "market_room_leader": "Room ADP Leader",
+                "market_room_adp_gap": "ADP Picks Behind Room Leader",
                 "adp_avg": "Mock ADP",
                 "market_rank": "Normalized Market Rank",
                 "fair_adp": "Fair ADP",
@@ -364,6 +374,9 @@ if forecast_years:
                 "player",
                 "pos",
                 "team",
+                "market_room_rank",
+                "market_room_size",
+                "market_room_adp_gap",
                 "fair_adp",
                 "actionable_adp",
                 "adp_avg",
@@ -379,6 +392,9 @@ if forecast_years:
                 "player": "Player",
                 "pos": "Position",
                 "team": "Team",
+                "market_room_rank": "Room ADP Rank",
+                "market_room_size": "ADP Room Candidates",
+                "market_room_adp_gap": "Picks Behind Room Leader",
                 "fair_adp": "Fair ADP",
                 "actionable_adp": "Actionable ADP",
                 "adp_avg": "Mock ADP",
@@ -398,7 +414,9 @@ if forecast_years:
         st.caption(
             "This view measures the destination team's recent production at each "
             "position. For each candidate, his own past production is removed from "
-            "the teammate-environment signal—even when he stayed on the same team."
+            "the teammate-environment signal—even when he stayed on the same team. "
+            "The player and draft-board tables separately show how mock drafters "
+            "rank each player against current same-team, same-position candidates."
         )
         outlook = build_team_position_outlook(forecast)
         outlook_position = st.selectbox(
@@ -812,7 +830,8 @@ with quality_tab:
           are marked low-confidence instead of being described as risk-free.
         - Each older season receives half the weight of the following season.
 
-        The forecast uses ADP as a market baseline, then heavily regularized,
+        The forecast uses ADP—including each player's hierarchy among same-team,
+        same-position candidates—as a market baseline. Heavily regularized,
         position-specific models estimate its error from prior player ability, role,
         availability, and destination-team evidence. Mock ADP comes from Fantasy
         Football Calculator's human half-PPR drafts; results come from nflverse game

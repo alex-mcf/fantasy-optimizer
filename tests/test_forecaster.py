@@ -124,6 +124,25 @@ class ForecasterTests(unittest.TestCase):
         self.assertGreater(components["market_adjustment"].abs().max(), 0)
         self.assertIn("market_position_rank", add_market_features(frame))
 
+    def test_market_features_measure_same_team_position_competition(self):
+        frame = pd.DataFrame(
+            [
+                {"player": "leader", "team": "DEN", "pos": "RB", "adp_avg": 30},
+                {"player": "backup", "team": "DEN", "pos": "RB", "adp_avg": 75},
+                {"player": "other", "team": "SEA", "pos": "RB", "adp_avg": 40},
+                {"player": "unknown", "team": "", "pos": "RB", "adp_avg": 90},
+            ]
+        )
+        featured = add_market_features(frame).set_index("player")
+        self.assertEqual(featured.loc["leader", "market_room_rank"], 1)
+        self.assertEqual(featured.loc["leader", "market_room_size"], 2)
+        self.assertEqual(featured.loc["leader", "market_room_leader"], 1)
+        self.assertEqual(featured.loc["backup", "market_room_rank"], 2)
+        self.assertEqual(featured.loc["backup", "market_room_adp_gap"], 45)
+        self.assertEqual(featured.loc["other", "market_room_size"], 1)
+        self.assertEqual(featured.loc["unknown", "market_room_known"], 0)
+        self.assertEqual(featured.loc["unknown", "market_room_leader"], 0)
+
     def test_edge_probability_is_historical_and_bounded(self):
         forecast = pd.DataFrame(
             [

@@ -15,6 +15,12 @@ The import uses one definition for every year:
 - average draft position from human mock drafts (computer picks are filtered by
   the provider).
 
+The forecast also derives a point-in-time role-competition proxy from each
+season's ADP pool: a player's ADP rank and pick distance behind the ADP leader
+among same-team, same-position candidates. This is reconstructible for every
+backtest season, but it represents the drafting market's view of the room—not an
+official roster or depth chart.
+
 The API has complete half-PPR responses for 2018 onward; it returns no half-PPR
 players for 2015–2017. Each import retains the provider's player ID, number of
 mock selections, high/low pick, and ADP standard deviation. The current-season
@@ -111,6 +117,8 @@ rates.
 - Results are reconstructed observations from completed NFL games.
 - ADP is observed market behavior from a finite sample of mock drafts; it is
   concrete for the provider's recorded sample, not a universal player value.
+- Same-team position ADP rank is calculated from that observed sample. It is a
+  modeled market feature, not concrete evidence of the team's depth-chart order.
 - Team-position history is observed production, but treating it as evidence for
   next season's role is a modeling assumption.
 - Market-implied points use current ADP and its mock-sample uncertainty.

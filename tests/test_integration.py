@@ -53,6 +53,9 @@ class HistoricalPipelineTests(unittest.TestCase):
                     "adp_avg",
                     "value_gap",
                     "actionable_adp",
+                    "market_room_rank",
+                    "market_room_size",
+                    "market_room_adp_gap",
                     "edge_probability",
                 ]
             ]

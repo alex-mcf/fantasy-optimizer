@@ -83,6 +83,9 @@ MARKET_FEATURE_COLUMNS = [
     "market_log_adp",
     "market_sqrt_adp",
     "market_position_rank",
+    "market_room_known",
+    "market_room_rank",
+    "market_room_adp_gap",
     "market_log_samples",
     "market_stddev",
     "market_range",
@@ -132,6 +135,38 @@ def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
     featured["market_position_rank"] = featured.groupby(groups)["adp_avg"].rank(
         method="first", ascending=True
     )
+    team = featured.get(
+        "team", pd.Series("", index=featured.index, dtype="object")
+    ).fillna("").astype(str).str.strip().str.upper()
+    featured["market_room_known"] = (
+        ~team.isin({"", "FA", "NAN", "NONE"})
+    ).astype(int)
+    featured["market_room_rank"] = 1.0
+    featured["market_room_size"] = 1.0
+    featured["market_room_leader"] = 0.0
+    featured["market_room_adp_gap"] = 0.0
+    known = featured["market_room_known"].eq(1)
+    if known.any():
+        room_groups = [*groups, "team"]
+        room = featured.loc[known].copy()
+        room["market_room_rank"] = room.groupby(room_groups)["adp_avg"].rank(
+            method="first", ascending=True
+        )
+        room["market_room_size"] = room.groupby(room_groups)["adp_avg"].transform(
+            "size"
+        )
+        room["market_room_leader"] = room["market_room_rank"].eq(1).astype(int)
+        room["market_room_adp_gap"] = room["adp_avg"] - room.groupby(room_groups)[
+            "adp_avg"
+        ].transform("min")
+
+        room_columns = [
+            "market_room_rank",
+            "market_room_size",
+            "market_room_leader",
+            "market_room_adp_gap",
+        ]
+        featured.loc[known, room_columns] = room[room_columns]
     samples = (
         featured["timesdrafted"]
         if "timesdrafted" in featured
@@ -162,7 +197,7 @@ def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
 class MarketResidualModel:
     """Use ADP as a baseline, then learn position-specific market mistakes."""
 
-    alpha_market: float = 8.0
+    alpha_market: float = 100.0
     alpha_residual: float = 300.0
     residual_feature_columns: tuple[str, ...] = tuple(FEATURE_COLUMNS)
     market_models_: dict[str, RidgeModel] = field(default_factory=dict)
@@ -829,6 +864,8 @@ def forecast_season(
         player_team_context,
         player_metadata,
     )
+    # Retain point-in-time market hierarchy fields for explanations in the UI.
+    features = add_market_features(features)
     point_components = model.predict_components(features)
     features["market_points"] = np.clip(
         point_components["market_prediction"], 0, 500
