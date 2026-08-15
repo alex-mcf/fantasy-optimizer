@@ -1,17 +1,20 @@
 # vorp.py
-import numpy as np
 import pandas as pd
 
-# VORP (Value Over Replacement Player) calculation module
-def compute_vorp(df):
+
+def compute_vorp(df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate value over a same-season, same-position replacement player."""
     df = df.copy()
+    year_col = next(
+        (column for column in ("year", "year_results", "year_adp") if column in df),
+        None,
+    )
+    if year_col is None:
+        raise KeyError("VORP scoring requires a year column.")
 
-    vorp = []
-
-    for pos, group in df.groupby("pos"):
+    groups = []
+    for (_, pos), group in df.groupby([year_col, "pos"], sort=False):
         replacement = group["projection"].sort_values(ascending=False).reset_index(drop=True)
-        
-        # choose replacement rank
         replacement_rank = {
             "QB": 12,
             "RB": 24,
@@ -24,7 +27,8 @@ def compute_vorp(df):
         else:
             repl_value = replacement.iloc[replacement_rank-1]
 
+        group = group.copy()
         group["vorp"] = group["projection"] - repl_value
-        vorp.append(group)
+        groups.append(group)
 
-    return pd.concat(vorp, ignore_index=True)
+    return pd.concat(groups, ignore_index=True)

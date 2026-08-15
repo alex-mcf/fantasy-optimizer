@@ -6,34 +6,31 @@ from fantasyoptimizer.scoring.vorp import compute_vorp
 from fantasyoptimizer.scoring.cost import compute_cost
 from fantasyoptimizer.scoring.risk import compute_risk
 
-def compute_scores(years: list[int]) -> pd.DataFrame:
 
+def compute_scores(years: list[int]) -> pd.DataFrame:
     df = build_history(years)
+    # Replacement levels and the dashboard currently support offensive slots.
+    df = df[df["pos"].isin(["QB", "RB", "WR", "TE"])].copy()
+    if df.empty:
+        raise ValueError("No supported QB, RB, WR, or TE records were found.")
 
     df = compute_projection(df)
     df = compute_vorp(df)
     df = compute_cost(df)
     df = compute_risk(df)
-    
-    # Weights for different years can be adjusted as needed
-    weights = {
-        2024: 0.6,
-        2023: 0.3,
-        2022: 0.1,
-    }
-    
-    if "year_results" in df.columns:
-        year_col = "year_results"
-    elif "year_adp" in df.columns:
-        year_col = "year_adp"
-    else:
-        year_col = "year"  
-        
-    df["weighted_value"] = df.apply(
-        lambda row: row["value_over_cost"] * weights.get(int(row[year_col]), 0.0),
-        axis=1,
+
+    year_col = next(
+        (column for column in ("year", "year_results", "year_adp") if column in df),
+        None,
     )
-    
+    if year_col is None:
+        raise KeyError("Scoring requires a year column.")
+
+    # Each season back receives half the influence of the following season.
+    newest_year = int(df[year_col].max())
+    df["recency_weight"] = 0.5 ** (newest_year - df[year_col].astype(int))
+    df["weighted_value_component"] = df["value_over_cost"] * df["recency_weight"]
+
     # Collapse to single score per player
     grouped = (
         df.groupby("player", as_index=False)
@@ -46,15 +43,19 @@ def compute_scores(years: list[int]) -> pd.DataFrame:
               "risk_penalty": "mean",  # average risk profile
               "round": "mean",         # average draft round
               "value_over_cost": "mean",
-              "weighted_value": "sum", # multi-year undervalue signal
+              "weighted_value_component": "sum",
+              "recency_weight": "sum",
           })
+    )
+
+    grouped["weighted_value"] = (
+        grouped.pop("weighted_value_component") / grouped.pop("recency_weight")
     )
 
     grouped["score"] = (
         grouped["weighted_value"]
-        + grouped["value_over_cost"]
-        - grouped["vorp"] * 0.4 # optional to keep top players high
-        - grouped["risk_penalty"] # penalize high risk
+        + grouped["vorp"]
+        - grouped["risk_penalty"]
     )
 
     grouped = grouped.sort_values(by="score", ascending=False).reset_index(drop=True)
