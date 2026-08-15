@@ -4,8 +4,11 @@ import pandas as pd
 
 from fantasyoptimizer.forecasting.forecaster import (
     FEATURE_COLUMNS,
+    MarketResidualModel,
     RidgeModel,
+    add_market_features,
     build_features,
+    calibrate_edge_probabilities,
 )
 
 
@@ -62,6 +65,66 @@ class ForecasterTests(unittest.TestCase):
         target = pd.Series([index * 15.0 for index in range(20)])
         predictions = RidgeModel().fit(frame, target).predict(frame)
         self.assertTrue(pd.Series(predictions).notna().all())
+
+    def test_market_residual_model_starts_from_adp_and_adjusts_by_position(self):
+        rows = []
+        for index in range(24):
+            row = {column: 0.0 for column in FEATURE_COLUMNS}
+            row.update(
+                {
+                    "pos": "RB",
+                    "target_year": 2023 + index // 12,
+                    "adp_avg": float(index + 1),
+                    "timesdrafted": 100,
+                    "high": max(1, index - 2),
+                    "low": index + 4,
+                    "stddev": 3.0,
+                    "lag1_ppg": float(index % 6),
+                    "pos_RB": 1.0,
+                }
+            )
+            rows.append(row)
+        frame = pd.DataFrame(rows)
+        target = pd.Series(260 - 5 * frame["adp_avg"] + 2 * frame["lag1_ppg"])
+        model = MarketResidualModel().fit(frame, target)
+        components = model.predict_components(frame)
+        self.assertTrue(components.notna().all().all())
+        self.assertTrue((components["market_prediction"] != 0).all())
+        self.assertGreater(components["market_adjustment"].abs().max(), 0)
+        self.assertIn("market_position_rank", add_market_features(frame))
+
+    def test_edge_probability_is_historical_and_bounded(self):
+        forecast = pd.DataFrame(
+            [
+                {
+                    "player": "example",
+                    "pos": "RB",
+                    "value_gap": 15,
+                    "market_rank": 60,
+                    "history_seasons": 2,
+                }
+            ]
+        )
+        history = pd.DataFrame(
+            [
+                {
+                    "pos": "RB",
+                    "predicted_rank_surplus": 15,
+                    "market_rank": 60,
+                    "beat_market": True,
+                },
+                {
+                    "pos": "RB",
+                    "predicted_rank_surplus": 16,
+                    "market_rank": 61,
+                    "beat_market": False,
+                },
+            ]
+        )
+        result = calibrate_edge_probabilities(forecast, history)
+        self.assertGreaterEqual(result.loc[0, "edge_probability"], 0)
+        self.assertLessEqual(result.loc[0, "edge_probability"], 1)
+        self.assertEqual(result.loc[0, "calibration_sample"], 2)
 
     def test_destination_team_position_context_follows_a_trade(self):
         candidate = pd.DataFrame(

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +65,16 @@ CONTEXT_FEATURE_COLUMNS = [
 
 FEATURE_COLUMNS = PLAYER_FEATURE_COLUMNS + CONTEXT_FEATURE_COLUMNS
 
+MARKET_FEATURE_COLUMNS = [
+    "adp_avg",
+    "market_log_adp",
+    "market_sqrt_adp",
+    "market_position_rank",
+    "market_log_samples",
+    "market_stddev",
+    "market_range",
+]
+
 
 @dataclass
 class RidgeModel:
@@ -96,6 +106,101 @@ class RidgeModel:
         values = frame[list(self.feature_columns)].to_numpy(dtype=float)
         design = np.column_stack([np.ones(len(values)), (values - self.mean_) / self.scale_])
         return design @ self.coefficients_
+
+
+def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Create point-in-time market features without using season results."""
+    featured = frame.copy()
+    featured["market_log_adp"] = np.log1p(featured["adp_avg"])
+    featured["market_sqrt_adp"] = np.sqrt(featured["adp_avg"])
+    groups = ["pos"]
+    if "target_year" in featured:
+        groups.insert(0, "target_year")
+    featured["market_position_rank"] = featured.groupby(groups)["adp_avg"].rank(
+        method="first", ascending=True
+    )
+    samples = (
+        featured["timesdrafted"]
+        if "timesdrafted" in featured
+        else pd.Series(0.0, index=featured.index)
+    )
+    deviation = (
+        featured["stddev"]
+        if "stddev" in featured
+        else pd.Series(0.0, index=featured.index)
+    )
+    high = (
+        featured["high"]
+        if "high" in featured
+        else featured["adp_avg"]
+    )
+    low = (
+        featured["low"]
+        if "low" in featured
+        else featured["adp_avg"]
+    )
+    featured["market_log_samples"] = np.log1p(samples.fillna(0).clip(lower=0))
+    featured["market_stddev"] = deviation.fillna(0).clip(lower=0)
+    featured["market_range"] = (low - high).fillna(0).clip(lower=0)
+    return featured
+
+
+@dataclass
+class MarketResidualModel:
+    """Use ADP as a baseline, then learn position-specific market mistakes."""
+
+    alpha_market: float = 8.0
+    alpha_residual: float = 100.0
+    residual_feature_columns: tuple[str, ...] = tuple(FEATURE_COLUMNS)
+    market_models_: dict[str, RidgeModel] = field(default_factory=dict)
+    residual_models_: dict[str, RidgeModel] = field(default_factory=dict)
+    error_scale_: dict[str, float] = field(default_factory=dict)
+
+    def fit(self, frame: pd.DataFrame, target: pd.Series) -> "MarketResidualModel":
+        prepared = add_market_features(frame)
+        aligned_target = pd.Series(target.to_numpy(dtype=float), index=prepared.index)
+        self.market_models_.clear()
+        self.residual_models_.clear()
+        self.error_scale_.clear()
+        for position, group in prepared.groupby("pos"):
+            position_target = aligned_target.loc[group.index]
+            market_model = RidgeModel(
+                alpha=self.alpha_market,
+                feature_columns=tuple(MARKET_FEATURE_COLUMNS),
+            ).fit(group, position_target)
+            market_prediction = market_model.predict(group)
+            residual_model = RidgeModel(
+                alpha=self.alpha_residual,
+                feature_columns=self.residual_feature_columns,
+            ).fit(group, position_target - market_prediction)
+            prediction = market_prediction + residual_model.predict(group)
+            self.market_models_[position] = market_model
+            self.residual_models_[position] = residual_model
+            scale = float(np.std(position_target.to_numpy() - prediction))
+            self.error_scale_[position] = max(scale, 1.0)
+        return self
+
+    def predict_components(self, frame: pd.DataFrame) -> pd.DataFrame:
+        prepared = add_market_features(frame)
+        output = pd.DataFrame(index=prepared.index)
+        output["market_prediction"] = 0.0
+        output["market_adjustment"] = 0.0
+        output["prediction"] = 0.0
+        output["error_scale"] = 1.0
+        for position, indices in prepared.groupby("pos").groups.items():
+            if position not in self.market_models_:
+                raise ValueError(f"No fitted market-residual model for {position}.")
+            group = prepared.loc[indices]
+            market = self.market_models_[position].predict(group)
+            adjustment = self.residual_models_[position].predict(group)
+            output.loc[indices, "market_prediction"] = market
+            output.loc[indices, "market_adjustment"] = adjustment
+            output.loc[indices, "prediction"] = market + adjustment
+            output.loc[indices, "error_scale"] = self.error_scale_[position]
+        return output
+
+    def predict(self, frame: pd.DataFrame) -> np.ndarray:
+        return self.predict_components(frame)["prediction"].to_numpy()
 
 
 def _result_history(years: list[int], data_dir: Path | str) -> pd.DataFrame:
@@ -528,8 +633,14 @@ def build_training_examples(
             player_team_context,
         )
         actual = load_results(target_year, data_dir)[
-            ["player_key", "pos", "pts_ttl"]
-        ].rename(columns={"pts_ttl": "actual_points"})
+            ["player_key", "pos", "pts_ttl", "pts_avg", "gp"]
+        ].rename(
+            columns={
+                "pts_ttl": "actual_points",
+                "pts_avg": "actual_ppg",
+                "gp": "actual_games",
+            }
+        )
         example = features.merge(actual, on=["player_key", "pos"], how="inner")
         example["target_year"] = target_year
         examples.append(example)
@@ -557,7 +668,12 @@ def _add_value_ranks(forecast: pd.DataFrame, config: LeagueConfig) -> pd.DataFra
         ["model_value", "forecast_points"], ascending=False, ignore_index=True
     )
     forecast["model_rank"] = range(1, len(forecast) + 1)
-    forecast["value_gap"] = forecast["adp_avg"] - forecast["model_rank"]
+    forecast["market_rank"] = (
+        forecast["adp_avg"].rank(method="first", ascending=True).astype(int)
+    )
+    forecast["fair_adp"] = forecast["model_rank"]
+    forecast["raw_adp_gap"] = forecast["adp_avg"] - forecast["model_rank"]
+    forecast["value_gap"] = forecast["market_rank"] - forecast["model_rank"]
     return forecast
 
 
@@ -592,7 +708,7 @@ def forecast_season(
     data_dir: Path | str = DEFAULT_DATA_DIR,
     training_examples: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Forecast a season independently of its ADP, then compare rank with ADP."""
+    """Forecast a season by adjusting the market for player/context evidence."""
     prior_years = [year for year in available_result_years(data_dir) if year < target_year]
     if target_year not in available_adp_years(data_dir):
         raise FileNotFoundError(f"No {target_year} preseason ADP file is available.")
@@ -601,10 +717,12 @@ def forecast_season(
         if training_examples is not None
         else build_training_examples(max(prior_years), data_dir)
     )
-    model = RidgeModel().fit(training, training["actual_points"])
-    player_only_model = RidgeModel(
-        feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
+    model = MarketResidualModel().fit(training, training["actual_points"])
+    player_only_model = MarketResidualModel(
+        residual_feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
     ).fit(training, training["actual_points"])
+    ppg_model = MarketResidualModel().fit(training, training["actual_ppg"])
+    games_model = MarketResidualModel().fit(training, training["actual_games"])
     candidates = load_adp(target_year, data_dir)
     candidates = candidates[candidates["pos"].isin(SUPPORTED_POSITIONS)].copy()
     history = _result_history(prior_years, data_dir)
@@ -617,12 +735,28 @@ def forecast_season(
         team_context,
         player_team_context,
     )
-    features["forecast_points"] = np.clip(model.predict(features), 0, 500).round(1)
+    point_components = model.predict_components(features)
+    features["market_points"] = np.clip(
+        point_components["market_prediction"], 0, 500
+    ).round(1)
+    features["forecast_points"] = np.clip(
+        point_components["prediction"], 0, 500
+    ).round(1)
+    features["market_adjustment"] = (
+        features["forecast_points"] - features["market_points"]
+    ).round(1)
     features["player_only_points"] = np.clip(
         player_only_model.predict(features), 0, 500
     ).round(1)
     features["context_adjustment"] = (
         features["forecast_points"] - features["player_only_points"]
+    ).round(1)
+    features["forecast_ppg"] = np.clip(ppg_model.predict(features), 0, 40).round(1)
+    features["forecast_games"] = np.clip(
+        games_model.predict(features), 0, 18
+    ).round(1)
+    features["availability_projection_points"] = (
+        features["forecast_ppg"] * features["forecast_games"]
     ).round(1)
     features["confidence"] = features["history_seasons"].map(
         {0: "Rookie / no NFL history", 1: "Low", 2: "Medium", 3: "High"}
@@ -693,11 +827,15 @@ def backtest_forecaster(
         test = examples[examples["target_year"] == target_year].copy()
         if train["target_year"].nunique() < 2 or test.empty:
             continue
-        model = RidgeModel().fit(train, train["actual_points"])
-        player_only_model = RidgeModel(
-            feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
+        model = MarketResidualModel().fit(train, train["actual_points"])
+        player_only_model = MarketResidualModel(
+            residual_feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
         ).fit(train, train["actual_points"])
+        market_components = model.predict_components(test)
         test["predicted"] = np.clip(model.predict(test), 0, 500)
+        test["market_predicted"] = np.clip(
+            market_components["market_prediction"], 0, 500
+        )
         test["player_only_predicted"] = np.clip(
             player_only_model.predict(test), 0, 500
         )
@@ -705,11 +843,16 @@ def backtest_forecaster(
         player_only_mae = float(
             (test["actual_points"] - test["player_only_predicted"]).abs().mean()
         )
+        market_mae = float(
+            (test["actual_points"] - test["market_predicted"]).abs().mean()
+        )
         rows.append(
             {
                 "year": int(target_year),
                 "players": len(test),
                 "mae": mae,
+                "market_mae": market_mae,
+                "market_mae_lift": market_mae - mae,
                 "player_only_mae": player_only_mae,
                 "context_mae_lift": player_only_mae - mae,
                 "rank_correlation": float(
@@ -746,7 +889,7 @@ def backtest_draft_value(
         if train["target_year"].nunique() < 2 or test.empty:
             continue
 
-        model = RidgeModel().fit(train, train["actual_points"])
+        model = MarketResidualModel().fit(train, train["actual_points"])
         test["predicted_points"] = np.clip(model.predict(test), 0, 500)
         test["market_rank"] = (
             test["adp_avg"].rank(method="first", ascending=True).astype(int)
@@ -881,3 +1024,103 @@ def backtest_draft_value(
     ]
     summary_rows.append(summarize(player_results, "Overall"))
     return pd.DataFrame(summary_rows), player_results
+
+
+def _edge_bucket(values: pd.Series) -> pd.Series:
+    return pd.cut(
+        values,
+        bins=[-np.inf, -12, 0, 12, 24, np.inf],
+        labels=["Below market", "Slight fade", "Near market", "1-round edge", "2+ round edge"],
+        right=False,
+    )
+
+
+def _market_tier(market_rank: pd.Series, league_size: int) -> pd.Series:
+    rounds = np.ceil(market_rank / league_size)
+    return pd.cut(
+        rounds,
+        bins=[0, 4, 9, np.inf],
+        labels=["Rounds 1-4", "Rounds 5-9", "Rounds 10+"],
+        right=True,
+    )
+
+
+def calibrate_edge_probabilities(
+    forecast: pd.DataFrame,
+    historical_players: pd.DataFrame,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+    prior_strength: float = 16.0,
+) -> pd.DataFrame:
+    """Estimate beat-ADP probability from comparable out-of-sample signals."""
+    calibrated = forecast.copy()
+    calibrated["edge_bucket"] = _edge_bucket(calibrated["value_gap"])
+    calibrated["market_tier"] = _market_tier(
+        calibrated["market_rank"], config.league_size
+    )
+    if historical_players.empty:
+        calibrated["edge_probability"] = 0.5
+        calibrated["calibration_sample"] = 0
+        return calibrated
+
+    history = historical_players.copy()
+    history["edge_bucket"] = _edge_bucket(history["predicted_rank_surplus"])
+    history["market_tier"] = _market_tier(
+        history["market_rank"], config.league_size
+    )
+    global_rate = float(history["beat_market"].mean())
+    rates = history.groupby(
+        ["pos", "edge_bucket", "market_tier"], observed=True
+    )["beat_market"].agg(["sum", "count"])
+    probabilities: list[float] = []
+    samples: list[int] = []
+    for row in calibrated.to_dict("records"):
+        key = (row["pos"], row["edge_bucket"], row["market_tier"])
+        if key in rates.index:
+            successes = float(rates.loc[key, "sum"])
+            count = int(rates.loc[key, "count"])
+        else:
+            successes = 0.0
+            count = 0
+        probabilities.append(
+            (successes + prior_strength * global_rate) / (count + prior_strength)
+        )
+        samples.append(count)
+    calibrated["edge_probability"] = probabilities
+    calibrated["calibration_sample"] = samples
+    calibrated["edge_confidence"] = np.select(
+        [
+            (calibrated["calibration_sample"] >= 30)
+            & (calibrated["history_seasons"] >= 2),
+            (calibrated["calibration_sample"] >= 12)
+            & (calibrated["history_seasons"] >= 1),
+        ],
+        ["High", "Medium"],
+        default="Low",
+    )
+    return calibrated
+
+
+def segment_draft_value(
+    historical_players: pd.DataFrame,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+) -> pd.DataFrame:
+    """Expose where the bargain signal works instead of hiding pooled weakness."""
+    if historical_players.empty:
+        return pd.DataFrame()
+    frame = historical_players.copy()
+    frame["market_tier"] = _market_tier(frame["market_rank"], config.league_size)
+    bargains = frame[frame["bargain_flag"]].copy()
+    bargains["model_closer"] = (
+        (bargains["actual_rank"] - bargains["predicted_rank"]).abs()
+        < (bargains["actual_rank"] - bargains["market_rank"]).abs()
+    )
+    return (
+        bargains.groupby(["pos", "market_tier"], observed=True, as_index=False)
+        .agg(
+            bargains=("player", "size"),
+            hit_rate=("beat_market", "mean"),
+            override_win_rate=("model_closer", "mean"),
+            average_actual_surplus=("actual_rank_surplus", "mean"),
+        )
+        .sort_values(["pos", "market_tier"], ignore_index=True)
+    )

@@ -74,6 +74,30 @@ def build_adp_export(players: pd.DataFrame) -> pd.DataFrame:
     return frame[columns]
 
 
+def write_adp_export(
+    adp: pd.DataFrame,
+    destination: Path,
+    metadata: dict,
+    preserve_snapshot: bool = True,
+) -> Path | None:
+    """Write the latest canonical file and an immutable timestamped snapshot."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    adp.to_csv(destination, index=False)
+    metadata_text = json.dumps(metadata, indent=2) + "\n"
+    destination.with_suffix(".meta.json").write_text(
+        metadata_text, encoding="utf-8"
+    )
+    if not preserve_snapshot:
+        return None
+    fetched = datetime.fromisoformat(metadata["fetched_at_utc"])
+    stamp = fetched.strftime("%Y%m%dT%H%M%SZ")
+    snapshot = destination.parent / "snapshots" / f"ADP_{stamp}.csv"
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    adp.to_csv(snapshot, index=False)
+    snapshot.with_suffix(".meta.json").write_text(metadata_text, encoding="utf-8")
+    return snapshot
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("years", type=int, nargs="+")
@@ -83,14 +107,17 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parents[1] / "data" / "raw",
     )
+    parser.add_argument(
+        "--no-snapshot",
+        action="store_true",
+        help="Replace the canonical season file without preserving a timestamped copy.",
+    )
     args = parser.parse_args()
 
     for year in sorted(set(args.years)):
         players, source_meta = download_adp(year, args.teams)
         adp = build_adp_export(players)
         destination = args.data_dir / str(year) / f"Pre_{year}_ADP(HPPR).csv"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        adp.to_csv(destination, index=False)
         metadata = {
             "season": year,
             "source": "Fantasy Football Calculator",
@@ -105,10 +132,15 @@ def main() -> None:
             "positions": list(POSITIONS),
             "players": len(adp),
         }
-        destination.with_suffix(".meta.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        snapshot = write_adp_export(
+            adp,
+            destination,
+            metadata,
+            preserve_snapshot=not args.no_snapshot,
         )
         print(f"Wrote {len(adp)} players to {destination}")
+        if snapshot is not None:
+            print(f"Preserved timestamped snapshot at {snapshot}")
 
 
 if __name__ == "__main__":

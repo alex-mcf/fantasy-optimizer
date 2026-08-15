@@ -6,27 +6,33 @@ from fantasyoptimizer.forecasting.forecaster import (
     backtest_forecaster,
     build_training_examples,
     build_team_position_outlook,
+    calibrate_edge_probabilities,
     forecast_season,
+    segment_draft_value,
 )
+from fantasyoptimizer.optimizer import build_draft_recommendations
 from fantasyoptimizer.scoring.scoring_engine import (
     SUPPORTED_POSITIONS,
     compute_player_season_scores,
     compute_scores,
 )
 from fantasyoptimizer.utils.data_loader import (
+    available_adp_snapshots,
     available_adp_years,
     available_years,
+    build_adp_movement,
     data_quality_report,
+    load_adp_metadata,
 )
 
 st.set_page_config(page_title="Fantasy Draft Value Forecaster", layout="wide")
 st.title("Fantasy Draft Value Forecaster")
 st.caption(
-    "Half-PPR historical analysis and independent model value versus mock-draft ADP"
+    "Half-PPR market-error forecasting and live draft decision support"
 )
 st.info(
-    "The forecast uses prior NFL results only. Current mock ADP is kept out of the "
-    "prediction and is joined afterward so differences remain meaningful.",
+    "ADP is the market baseline. Position-specific models use prior player, role, "
+    "and team evidence to predict where that baseline is wrong.",
     icon="ℹ️",
 )
 
@@ -43,13 +49,14 @@ def load_analysis(years: tuple[int, ...], config: LeagueConfig):
 @st.cache_data
 def load_forecast(target_year: int, config: LeagueConfig):
     training = build_training_examples(target_year - 1)
-    return (
-        forecast_season(target_year, config, training_examples=training),
-        backtest_forecaster(target_year - 1, training_examples=training),
-        backtest_draft_value(
-            target_year - 1, config, training_examples=training
-        ),
+    forecast = forecast_season(target_year, config, training_examples=training)
+    backtest = backtest_forecaster(target_year - 1, training_examples=training)
+    value_backtest, value_players = backtest_draft_value(
+        target_year - 1, config, training_examples=training
     )
+    forecast = calibrate_edge_probabilities(forecast, value_players, config)
+    segments = segment_draft_value(value_players, config)
+    return forecast, backtest, value_backtest, value_players, segments
 
 
 year_options = available_years()
@@ -105,16 +112,30 @@ else:
 if forecast_years:
     with forecast_tab:
         target_year = max(forecast_years)
+        adp_metadata = load_adp_metadata(target_year)
+        adp_fetched_at = str(adp_metadata.get("fetched_at_utc", "Unknown"))
+        snapshot_count = len(available_adp_snapshots(target_year))
+        adp_movement = build_adp_movement(target_year)
         with st.spinner(f"Training chronological model and forecasting {target_year}..."):
-            forecast, backtest, value_backtest_result = load_forecast(
+            (
+                forecast,
+                backtest,
+                value_backtest,
+                value_backtest_players,
+                value_segments,
+            ) = load_forecast(
                 target_year, league_config
             )
-            value_backtest, value_backtest_players = value_backtest_result
 
         st.subheader(f"{target_year} model value versus mock ADP")
         st.caption(
-            "Positive value gap means the model ranks a player earlier than human "
-            "half-PPR mock drafts. Forecast points do not use ADP as an input."
+            f"Market snapshot fetched: {adp_fetched_at} · Preserved snapshots: "
+            f"{snapshot_count}"
+        )
+        st.caption(
+            "Positive value gap means the model's fair ADP is earlier than the "
+            "normalized mock market. The model starts from ADP, then adjusts it "
+            "with player ability, role, destination context, and availability."
         )
         fc_search_col, fc_position_col, fc_confidence_col = st.columns([3, 1, 1])
         fc_search = fc_search_col.text_input(
@@ -139,7 +160,7 @@ if forecast_years:
                 forecast_filtered["confidence"] == fc_confidence
             ]
 
-        value_count = int((forecast_filtered["value_gap"] >= 12).sum())
+        value_count = int((forecast_filtered["value_gap"] >= league_size).sum())
         metric_1, metric_2, metric_3 = st.columns(3)
         metric_1.metric("Players modeled", len(forecast_filtered))
         metric_2.metric("Model ≥1 round earlier", value_count)
@@ -165,8 +186,12 @@ if forecast_years:
                 "pos",
                 "team",
                 "forecast_points",
+                "market_points",
+                "market_adjustment",
                 "player_only_points",
                 "context_adjustment",
+                "forecast_ppg",
+                "forecast_games",
                 "position_rank",
                 "model_value",
                 "team_context_rank",
@@ -177,7 +202,11 @@ if forecast_years:
                 "same_team_last_year",
                 "changed_team",
                 "adp_avg",
+                "market_rank",
+                "fair_adp",
                 "value_gap",
+                "edge_probability",
+                "edge_confidence",
                 "timesdrafted",
                 "confidence",
             ]
@@ -188,8 +217,12 @@ if forecast_years:
                 "pos": "Position",
                 "team": "Team",
                 "forecast_points": "Forecast Points",
+                "market_points": "Market-Implied Points",
+                "market_adjustment": "Predicted Market Error",
                 "player_only_points": "Player-Only Points",
                 "context_adjustment": "Team Context Adjustment",
+                "forecast_ppg": "Forecast PPG",
+                "forecast_games": "Forecast Games",
                 "position_rank": "Position Rank",
                 "model_value": "Forecast VORP",
                 "team_context_rank": "Team Position Context Rank",
@@ -200,7 +233,11 @@ if forecast_years:
                 "same_team_last_year": "Same Team",
                 "changed_team": "Changed Team",
                 "adp_avg": "Mock ADP",
-                "value_gap": "Value Gap",
+                "market_rank": "Normalized Market Rank",
+                "fair_adp": "Fair ADP",
+                "value_gap": "Expected Pick Value",
+                "edge_probability": "Probability Beat ADP %",
+                "edge_confidence": "Edge Confidence",
                 "timesdrafted": "Mock Samples",
                 "confidence": "History Confidence",
             }
@@ -209,6 +246,9 @@ if forecast_years:
         forecast_display["Prior Opportunity Share %"] = (
             100 * forecast_display["Prior Opportunity Share %"]
         ).round(0)
+        forecast_display["Probability Beat ADP %"] = (
+            100 * forecast_display["Probability Beat ADP %"]
+        ).round(0)
         st.dataframe(forecast_display, hide_index=True, width="stretch")
         st.download_button(
             f"Download {target_year} forecast",
@@ -216,6 +256,117 @@ if forecast_years:
             file_name=f"fantasy_forecast_{target_year}.csv",
             mime="text/csv",
         )
+
+        with st.expander("ADP movement"):
+            if adp_movement.empty:
+                st.info(
+                    "One ADP snapshot is preserved. Refresh the ADP importer on "
+                    "another day to begin measuring risers, fallers, and future "
+                    "draft-day ADP."
+                )
+            else:
+                movement_display = adp_movement[
+                    [
+                        "player",
+                        "pos",
+                        "team",
+                        "first_adp",
+                        "latest_adp",
+                        "adp_movement",
+                        "snapshots",
+                    ]
+                ].rename(
+                    columns={
+                        "player": "Player",
+                        "pos": "Position",
+                        "team": "Team",
+                        "first_adp": "First ADP",
+                        "latest_adp": "Latest ADP",
+                        "adp_movement": "Picks Risen",
+                        "snapshots": "Snapshots",
+                    }
+                )
+                movement_display["Player"] = movement_display["Player"].str.title()
+                st.dataframe(movement_display, hide_index=True, width="stretch")
+
+        st.subheader("Live draft decision board")
+        st.caption(
+            "Enter the current and next selection, then mark drafted players. The "
+            "board distinguishes players to take now from values likely to survive "
+            "until your next turn. Availability uses mock-pick variability and is "
+            "an estimate, not a guarantee."
+        )
+        pick_col, next_col = st.columns(2)
+        current_pick = int(
+            pick_col.number_input("Current overall pick", min_value=1, value=1)
+        )
+        next_pick = int(
+            next_col.number_input(
+                "Your next overall pick",
+                min_value=current_pick + 1,
+                value=max(current_pick + 1, 2 * league_size),
+            )
+        )
+        drafted_players = st.multiselect(
+            "Players already drafted",
+            options=forecast["player"].tolist(),
+            format_func=lambda player: str(player).title(),
+        )
+        st.caption("Your current roster counts")
+        roster_cols = st.columns(4)
+        roster_counts = {
+            position: int(
+                column.number_input(
+                    position,
+                    min_value=0,
+                    max_value=10,
+                    value=0,
+                    key=f"roster_{position}",
+                )
+            )
+            for position, column in zip(SUPPORTED_POSITIONS, roster_cols)
+        }
+        draft_board = build_draft_recommendations(
+            forecast,
+            current_pick,
+            next_pick,
+            roster_counts,
+            set(drafted_players),
+            league_config,
+        )
+        draft_display = draft_board.head(25)[
+            [
+                "recommendation",
+                "player",
+                "pos",
+                "team",
+                "fair_adp",
+                "adp_avg",
+                "value_gap",
+                "edge_probability",
+                "available_next_pick_probability",
+                "forecast_points",
+                "remaining_starter_need",
+            ]
+        ].rename(
+            columns={
+                "recommendation": "Recommendation",
+                "player": "Player",
+                "pos": "Position",
+                "team": "Team",
+                "fair_adp": "Fair ADP",
+                "adp_avg": "Mock ADP",
+                "value_gap": "Expected Pick Value",
+                "edge_probability": "Probability Beat ADP %",
+                "available_next_pick_probability": "Available Next Pick %",
+                "forecast_points": "Forecast Points",
+                "remaining_starter_need": "Remaining Starter Need",
+            }
+        )
+        draft_display["Player"] = draft_display["Player"].str.title()
+        for column in ["Probability Beat ADP %", "Available Next Pick %"]:
+            draft_display[column] = (100 * draft_display[column]).round(0)
+        st.dataframe(draft_display, hide_index=True, width="stretch")
 
         st.subheader("Team-position outlook")
         st.caption(
@@ -300,6 +451,8 @@ if forecast_years:
                     "year": "Season",
                     "players": "Players",
                     "mae": "Point MAE",
+                    "market_mae": "Market Point MAE",
+                    "market_mae_lift": "Point MAE Improvement vs Market",
                     "player_only_mae": "Player-Only MAE",
                     "context_mae_lift": "Context MAE Improvement",
                     "rank_correlation": "Rank Correlation",
@@ -307,6 +460,8 @@ if forecast_years:
             )
             for column in [
                 "Point MAE",
+                "Market Point MAE",
+                "Point MAE Improvement vs Market",
                 "Player-Only MAE",
                 "Context MAE Improvement",
             ]:
@@ -321,7 +476,8 @@ if forecast_years:
             "For each season, the model was trained only on earlier seasons. A "
             "bargain means its league-adjusted model rank was at least one round "
             "ahead of market rank; a hit means its realized league-adjusted rank "
-            "finished ahead of that market rank."
+            "finished ahead of that market rank. These seasons are the model's "
+            "development evidence; 2026 is the first untouched prospective test."
         )
         if value_backtest.empty:
             st.warning("Not enough earlier seasons are available for a value backtest.")
@@ -384,6 +540,27 @@ if forecast_years:
             ]:
                 value_display[column] = value_display[column].round(2)
             st.dataframe(value_display, hide_index=True, width="stretch")
+            st.caption(
+                "Segment results reveal whether pooled performance is concentrated "
+                "in a particular position or part of the draft."
+            )
+            segment_display = value_segments.rename(
+                columns={
+                    "pos": "Position",
+                    "market_tier": "Market Tier",
+                    "bargains": "Bargains",
+                    "hit_rate": "Hit Rate %",
+                    "override_win_rate": "Override Win Rate %",
+                    "average_actual_surplus": "Average Actual Rank Surplus",
+                }
+            )
+            for column in ["Hit Rate %", "Override Win Rate %"]:
+                segment_display[column] = (100 * segment_display[column]).round(1)
+            segment_display["Market Tier"] = segment_display["Market Tier"].astype(str)
+            segment_display["Average Actual Rank Surplus"] = segment_display[
+                "Average Actual Rank Surplus"
+            ].round(1)
+            st.dataframe(segment_display, hide_index=True, width="stretch")
             st.download_button(
                 "Download historical value-backtest players",
                 value_backtest_players.to_csv(index=False),
@@ -552,11 +729,12 @@ with quality_tab:
           are marked low-confidence instead of being described as risk-free.
         - Each older season receives half the weight of the following season.
 
-        The forecast is a separate ridge model trained on prior results. It does not
-        use current ADP as an input. Mock ADP comes from Fantasy Football Calculator's
-        human half-PPR drafts; results come from nflverse game data. Separate position
-        models combine player history with the destination team's prior production at
-        that position.
+        The forecast uses ADP as a market baseline, then heavily regularized,
+        position-specific models estimate its error from prior player ability, role,
+        availability, and destination-team evidence. Mock ADP comes from Fantasy
+        Football Calculator's human half-PPR drafts; results come from nflverse game
+        data. Beat-ADP probabilities are calibrated only from chronological historical
+        predictions.
 
         Data provenance and import commands are documented in `data/SOURCES.md`.
         """

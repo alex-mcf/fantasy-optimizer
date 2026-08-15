@@ -4,12 +4,33 @@ from pathlib import Path
 
 from fantasyoptimizer.utils.data_loader import (
     available_years,
+    build_adp_movement,
     data_quality_report,
     join_year,
 )
 
 
 class DataLoaderTests(unittest.TestCase):
+    def test_adp_movement_uses_preserved_snapshots(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            snapshot_dir = Path(temp_dir) / "2026" / "snapshots"
+            snapshot_dir.mkdir(parents=True)
+            for stamp, adp in [("20260801T000000Z", 50.0), ("20260808T000000Z", 40.0)]:
+                path = snapshot_dir / f"ADP_{stamp}.csv"
+                path.write_text(
+                    f"Rank,Player,Team,POS,AVG\n1,Example Player,NE,RB,{adp}\n",
+                    encoding="utf-8",
+                )
+                path.with_suffix(".meta.json").write_text(
+                    '{"fetched_at_utc": "'
+                    + ("2026-08-01T00:00:00+00:00" if adp == 50 else "2026-08-08T00:00:00+00:00")
+                    + '"}\n',
+                    encoding="utf-8",
+                )
+            movement = build_adp_movement(2026, temp_dir)
+            self.assertEqual(movement.loc[0, "adp_movement"], 10.0)
+            self.assertEqual(movement.loc[0, "snapshots"], 2)
+
     def test_complete_year_and_position_normalization(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             year_dir = Path(temp_dir) / "2024"

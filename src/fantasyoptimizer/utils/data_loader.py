@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -147,22 +148,13 @@ def available_player_context_years(
     )
 
 
-def load_adp(year: int, data_dir: Path | str = DEFAULT_DATA_DIR) -> pd.DataFrame:
-    path = Path(data_dir) / str(year) / f"Pre_{year}_ADP(HPPR).csv"
-    df = _read_csv(path)
-
-    # normalize column names
+def _normalize_adp_frame(df: pd.DataFrame, year: int) -> pd.DataFrame:
     df.columns = df.columns.str.strip().str.lower()
-
-    # normalize key columns
     df["player"] = df["player"].str.strip().str.lower()
     df["player_key"] = _normalize_player_key(df["player"])
     df["pos"] = _normalize_position(df["pos"])
     df["team"] = _normalize_team(df["team"])
-
-    # rename avg to something ADP-specific
     df = df.rename(columns={"avg": "adp_avg"})
-
     keep_columns = ["rank", "player", "player_key", "team", "pos", "adp_avg"]
     optional_columns = ["playerid", "timesdrafted", "high", "low", "stddev"]
     keep_columns.extend(column for column in optional_columns if column in df.columns)
@@ -174,6 +166,72 @@ def load_adp(year: int, data_dir: Path | str = DEFAULT_DATA_DIR) -> pd.DataFrame
     df = df.dropna(subset=["player", "pos", "adp_avg"])
     df["year"] = year
     return df
+
+
+def load_adp(year: int, data_dir: Path | str = DEFAULT_DATA_DIR) -> pd.DataFrame:
+    path = Path(data_dir) / str(year) / f"Pre_{year}_ADP(HPPR).csv"
+    return _normalize_adp_frame(_read_csv(path), year)
+
+
+def load_adp_metadata(
+    year: int, data_dir: Path | str = DEFAULT_DATA_DIR
+) -> dict[str, object]:
+    path = Path(data_dir) / str(year) / f"Pre_{year}_ADP(HPPR).meta.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def available_adp_snapshots(
+    year: int, data_dir: Path | str = DEFAULT_DATA_DIR
+) -> list[Path]:
+    snapshot_dir = Path(data_dir) / str(year) / "snapshots"
+    if not snapshot_dir.exists():
+        return []
+    return sorted(snapshot_dir.glob("ADP_*.csv"))
+
+
+def load_adp_snapshot_history(
+    year: int, data_dir: Path | str = DEFAULT_DATA_DIR
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for path in available_adp_snapshots(year, data_dir):
+        frame = _normalize_adp_frame(_read_csv(path), year)
+        metadata_path = path.with_suffix(".meta.json")
+        metadata = (
+            json.loads(metadata_path.read_text(encoding="utf-8"))
+            if metadata_path.exists()
+            else {}
+        )
+        frame["snapshot_at"] = pd.to_datetime(
+            metadata.get("fetched_at_utc"), utc=True, errors="coerce"
+        )
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True).sort_values(
+        ["snapshot_at", "adp_avg"], ignore_index=True
+    )
+
+
+def build_adp_movement(
+    year: int, data_dir: Path | str = DEFAULT_DATA_DIR
+) -> pd.DataFrame:
+    history = load_adp_snapshot_history(year, data_dir)
+    if history.empty or history["snapshot_at"].nunique() < 2:
+        return pd.DataFrame()
+    ordered = history.sort_values("snapshot_at")
+    movement = ordered.groupby(["player_key", "pos"], as_index=False).agg(
+        player=("player", "last"),
+        team=("team", "last"),
+        first_snapshot=("snapshot_at", "first"),
+        latest_snapshot=("snapshot_at", "last"),
+        first_adp=("adp_avg", "first"),
+        latest_adp=("adp_avg", "last"),
+        snapshots=("snapshot_at", "nunique"),
+    )
+    movement["adp_movement"] = movement["first_adp"] - movement["latest_adp"]
+    return movement.sort_values("adp_movement", ascending=False, ignore_index=True)
 
 
 # Load results data for a given year

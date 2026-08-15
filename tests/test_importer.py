@@ -1,4 +1,7 @@
 import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pandas as pd
 
@@ -7,7 +10,7 @@ from scripts.import_nflverse_results import (
     build_player_team_context,
     build_team_position_context,
 )
-from scripts.import_ffc_adp import build_adp_export
+from scripts.import_ffc_adp import build_adp_export, write_adp_export
 
 
 class NflverseImporterTests(unittest.TestCase):
@@ -111,6 +114,21 @@ class NflverseImporterTests(unittest.TestCase):
         )
         result = build_adp_export(players)
         self.assertEqual(result["Player"].tolist(), ["Valid Runner"])
+
+    def test_adp_import_preserves_timestamped_snapshot(self):
+        adp = pd.DataFrame(
+            [{"Rank": 1, "Player": "Example", "POS": "RB", "AVG": 1.0}]
+        )
+        metadata = {
+            "fetched_at_utc": datetime(2026, 8, 14, tzinfo=timezone.utc).isoformat()
+        }
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "2026" / "Pre_2026_ADP(HPPR).csv"
+            snapshot = write_adp_export(adp, destination, metadata)
+            self.assertTrue(destination.exists())
+            self.assertIsNotNone(snapshot)
+            self.assertTrue(snapshot.exists())
+            self.assertTrue(snapshot.with_suffix(".meta.json").exists())
 
     def test_team_position_context_uses_weekly_team_assignment(self):
         stats = pd.DataFrame(

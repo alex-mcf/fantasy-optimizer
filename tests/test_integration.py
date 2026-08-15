@@ -4,6 +4,7 @@ from fantasyoptimizer.forecasting.forecaster import (
     backtest_draft_value,
     backtest_forecaster,
     build_training_examples,
+    calibrate_edge_probabilities,
     forecast_season,
 )
 from fantasyoptimizer.scoring.scoring_engine import (
@@ -33,16 +34,22 @@ class HistoricalPipelineTests(unittest.TestCase):
         value_backtest, value_players = backtest_draft_value(
             2025, training_examples=training
         )
+        forecast = calibrate_edge_probabilities(forecast, value_players)
         self.assertGreater(len(forecast), 100)
         self.assertFalse(
             forecast[
                 [
                     "forecast_points",
+                    "market_points",
+                    "market_adjustment",
+                    "forecast_ppg",
+                    "forecast_games",
                     "player_only_points",
                     "context_adjustment",
                     "model_rank",
                     "adp_avg",
                     "value_gap",
+                    "edge_probability",
                 ]
             ]
             .isna()

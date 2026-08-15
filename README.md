@@ -4,7 +4,7 @@ FantasyOptimizer combines a consistent half-PPR history with a transparent
 upcoming-season forecast. It provides two related views:
 
 - retrospective value: preseason mock ADP versus completed results; and
-- forecast value: an independent model rank versus current mock-draft ADP.
+- forecast value: a market-aware fair rank versus current mock-draft ADP.
 
 ## Setup
 
@@ -44,7 +44,7 @@ python -m unittest discover -s tests -v
 
 ## Forecast method
 
-The baseline is deliberately small and auditable. For every target season it
+The model is deliberately small and auditable. For every target season it
 builds player features from only the preceding three completed NFL seasons:
 recent points per game, games played, total points, trend, available history,
 and position. It also builds destination team-position features from actual
@@ -52,20 +52,25 @@ weekly production. The signals are deliberately separated into player ability
 (points, points per game, and points per opportunity), role (share of the
 position's opportunities), and environment (team-position volume plus teammate
 points and opportunities with the candidate removed). The subtraction applies
-whether the player stayed or changed teams. A ridge regression predicts season
-points. League-specific replacement levels convert those point forecasts into
-VORP and an overall model rank.
+whether the player stayed or changed teams.
 
-The current season's ADP is excluded from model features. It is joined after the
-model rank is complete:
+ADP is treated as a strong market baseline instead of discarded. Separate
+position-specific ridge models estimate the production implied by ADP, then a
+heavily regularized player/role/context model predicts the market's residual
+error. Separate models estimate points per game and games played so performance
+and availability are visible even though direct season points remain the primary
+ranking target. League-specific replacement levels convert the adjusted point
+forecast into VORP and fair ADP:
 
 ```text
-value gap = mock ADP - model rank
+expected pick value = normalized market rank - fair ADP
 ```
 
-A positive gap means the independent model would select the player earlier than
-the mock market. Rookies and players without usable NFL history receive a
-position-and-team-context baseline and are explicitly labeled low-information.
+A positive value means the evidence supports selecting the player earlier than
+the mock market. Beat-ADP probabilities are calibrated from comparable
+out-of-sample historical signals and display their sample size/confidence.
+Rookies and players without usable NFL history remain explicitly labeled
+low-information.
 
 The dashboard reports expanding-window chronological backtests. A backtest for
 season `Y` is trained only on target seasons before `Y`, avoiding random-split
@@ -79,10 +84,27 @@ same season and ADP round. Model-versus-market rank error and the rate at which 
 model override was closer to reality are shown as stricter checks. Historical
 player-level results can be downloaded for inspection.
 
+The residual regularization was selected while developing against these
+historical seasons. The splits are chronological and player outcomes never leak
+backward, but the aggregate should still be treated as development evidence;
+2026 is the first untouched prospective test of the finalized specification.
+
 The app also includes a team-position outlook. This ranks recent QB, RB, WR, and
 TE environments independently of the current player name, then shows which
 current candidate the model prefers for that role. The player table displays a
 player-only forecast, contextual forecast, and the difference between them.
+
+The live draft decision board accepts the current pick, next pick, drafted
+players, and roster counts. It estimates whether each available player will
+survive to the next selection using mock-draft variability, then labels choices
+as draft now, consider now, target while waiting, wait, or pass. This is an
+auditable heuristic; historical full-draft simulation is still required before
+treating it as an optimized roster policy.
+
+Every ADP refresh now preserves an immutable timestamped copy under that
+season's `snapshots/` folder. Once multiple points in the draft season have been
+collected, those snapshots can train and validate a separate closing-ADP
+movement model.
 
 ## Historical score
 
