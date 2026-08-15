@@ -2,18 +2,15 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-archive_commit=5a89742
-data_dir="$repo_root/data/raw"
-
-if ! git -C "$repo_root" cat-file -e "$archive_commit^{commit}" 2>/dev/null; then
-    echo "Historical commit $archive_commit is unavailable in this clone." >&2
-    echo "Fetch full Git history and try again." >&2
-    exit 1
+python_bin="$repo_root/.venv/bin/python"
+if [ ! -x "$python_bin" ]; then
+    python_bin=python3
 fi
 
-mkdir -p "$data_dir"
-git -C "$repo_root" archive "$archive_commit" data \
-    | tar -x --strip-components=1 -C "$data_dir"
+"$python_bin" "$repo_root/scripts/import_nflverse_results.py" \
+    2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025
+"$python_bin" "$repo_root/scripts/import_ffc_adp.py" \
+    2018 2019 2020 2021 2022 2023 2024 2025 2026
+"$python_bin" "$repo_root/scripts/validate_data.py"
 
-echo "Historical CSVs restored under $data_dir"
-
+echo "Consistent historical archive refreshed under $repo_root/data/raw"

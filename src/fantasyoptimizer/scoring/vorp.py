@@ -1,8 +1,12 @@
 # vorp.py
+from collections.abc import Mapping
+
 import pandas as pd
 
 
-def compute_vorp(df: pd.DataFrame) -> pd.DataFrame:
+def compute_vorp(
+    df: pd.DataFrame, replacement_ranks: Mapping[str, int] | None = None
+) -> pd.DataFrame:
     """Calculate value over a same-season, same-position replacement player."""
     df = df.copy()
     year_col = next(
@@ -12,15 +16,18 @@ def compute_vorp(df: pd.DataFrame) -> pd.DataFrame:
     if year_col is None:
         raise KeyError("VORP scoring requires a year column.")
 
+    replacement_ranks = replacement_ranks or {
+        "QB": 12,
+        "RB": 24,
+        "WR": 36,
+        "TE": 12,
+    }
     groups = []
     for (_, pos), group in df.groupby([year_col, "pos"], sort=False):
         replacement = group["projection"].sort_values(ascending=False).reset_index(drop=True)
-        replacement_rank = {
-            "QB": 12,
-            "RB": 24,
-            "WR": 36,
-            "TE": 12
-        }.get(pos, 24)
+        replacement_rank = replacement_ranks.get(pos, 24)
+        if replacement_rank <= 0:
+            raise ValueError("Replacement ranks must be positive.")
 
         if len(replacement) < replacement_rank:
             repl_value = replacement.iloc[-1]
