@@ -311,21 +311,25 @@ def _best_weight(
     """
     if not seasons:
         return default
-    pooled = {
-        weight: np.concatenate([season[weight] for season in seasons])
+    means = {
+        weight: float(np.mean([season[weight].mean() for season in seasons]))
         for weight in grid
     }
-    means = {weight: float(values.mean()) for weight, values in pooled.items()}
     best = max(grid, key=lambda weight: means[weight])
-    differences = {
-        weight: pooled[best] - pooled[weight] for weight in grid if weight != best
-    }
     for weight in grid:
         if weight == best:
             return float(weight)
-        gap = differences[weight]
-        error = float(gap.std(ddof=1) / np.sqrt(len(gap))) if len(gap) > 1 else 0.0
-        if float(gap.mean()) <= error:
+        # Cluster the error by season. Simulations inside one season share a
+        # player pool and one set of realized outcomes, so treating them as
+        # independent makes the objective look far more precise than it is and
+        # the selected weight then moves with the random seed.
+        gaps = np.array(
+            [season[best].mean() - season[weight].mean() for season in seasons]
+        )
+        error = (
+            float(gaps.std(ddof=1) / np.sqrt(len(gaps))) if len(gaps) > 1 else 0.0
+        )
+        if float(gaps.mean()) <= error:
             return float(weight)
     return float(best)
 
@@ -334,7 +338,7 @@ def policy_blend_weights(
     historical_players: pd.DataFrame,
     config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
     grid: tuple[float, ...] = POLICY_BLEND_WEIGHT_GRID,
-    simulations_per_year: int = 40,
+    simulations_per_year: int = 100,
     max_rounds: int = 10,
     seed: int = 20260815,
     default: float = DEFAULT_MODEL_BLEND_WEIGHT,
@@ -348,6 +352,13 @@ def policy_blend_weights(
     Returns the weight for a prospective board, fitted on every available season,
     and the nested weight for each backtested season, fitted only on seasons
     before it. Both come from one scoring pass because the caller needs both.
+
+    The objective is deliberately sampled hard enough to be reproducible. It is
+    flat between roughly 0.2 and 0.5 — the model improved until the optimum
+    flattened — so at a small simulation count the winner is whichever candidate
+    got lucky, and the weight shown on a live board would move between runs.
+    Do not read the fitted weight as a precise optimum; read it as the
+    conservative end of a range that all performs about the same.
     """
     if historical_players.empty or not POLICY_REQUIRED_COLUMNS.issubset(
         historical_players.columns

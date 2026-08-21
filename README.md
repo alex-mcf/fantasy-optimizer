@@ -261,6 +261,34 @@ collected, those snapshots can train and validate a separate closing-ADP
 movement model. Official-role refreshes preserve timestamped copies in the same
 folder so depth-chart changes can be audited without overwriting prior states.
 
+## Using the board against a mock ADP
+
+The dashboard's draft simulation answers "should I draft off this board?". The
+narrower question in front of a mock ADP list — "the model disagrees about this
+player, should I act on it?" — has its own evaluation:
+
+```bash
+python scripts/evaluate_adp_comparison.py
+```
+
+It reports how disagreements of each size have performed, where on the board and
+at which position they pay, and whether they survive the market moving. Three
+results shape how the board should be read:
+
+- **Two rounds is the threshold.** Players the model moves up a single round beat
+  their ADP 49% of the time against a 42% base rate — inside the noise. Two-round
+  calls hit 63%, three-round 69%, and four-plus 90% with a mean realized surplus
+  of +51 ranks. The dashboard's headline count uses two rounds for this reason.
+- **Position and stage matter as much as size.** Tight-end bargains after round 7
+  beat their ADP in 89–95% of cases. Quarterbacks the model promotes into the
+  first three rounds are its worst category by a wide margin. A disagreement is
+  not a single kind of claim.
+- **The advice is mostly stable across markets.** Re-pricing the board on a
+  different plausible mock market keeps about 80% of the flagged bargains, and
+  they still beat their ADP roughly 70–77% of the time. Calls sitting near the
+  threshold are the ones that move, which is another argument for acting on
+  two-round gaps rather than one-round gaps.
+
 ## Historical score
 
 The retrospective tabs calculate realized value over same-season ADP cost,
