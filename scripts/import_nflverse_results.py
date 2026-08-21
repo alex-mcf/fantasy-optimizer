@@ -9,10 +9,16 @@ from io import BytesIO
 import json
 from pathlib import Path
 import re
+import sys
 import unicodedata
 
 import pandas as pd
 import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from fantasyoptimizer.utils.atomic import write_csv, write_text  # noqa: E402
 
 URL_TEMPLATE = (
     "https://github.com/nflverse/nflverse-data/releases/download/"
@@ -233,7 +239,6 @@ def main() -> None:
 
     for year in sorted(set(args.years)):
         destination = args.data_dir / str(year) / f"Post_{year}_Results(HPPR).csv"
-        destination.parent.mkdir(parents=True, exist_ok=True)
         stats_url = URL_TEMPLATE.format(year=year)
         snaps_url = SNAP_URL_TEMPLATE.format(year=year)
         stats = download_weekly_stats(year)
@@ -241,15 +246,15 @@ def main() -> None:
         results = build_half_ppr_results(stats, year, snap_counts=snap_counts)
         context = build_team_position_context(stats, year)
         player_team_context = build_player_team_context(stats, year)
-        results.to_csv(destination, index=False, na_rep="-")
+        write_csv(results, destination, index=False, na_rep="-")
         context_destination = (
             args.data_dir / str(year) / f"Team_Position_{year}_Context(HPPR).csv"
         )
-        context.to_csv(context_destination, index=False)
+        write_csv(context, context_destination, index=False)
         player_context_destination = (
             args.data_dir / str(year) / f"Player_Team_{year}_Context(HPPR).csv"
         )
-        player_team_context.to_csv(player_context_destination, index=False)
+        write_csv(player_team_context, player_context_destination, index=False)
         metadata = {
             "season": year,
             "source": "nflverse",
@@ -268,8 +273,9 @@ def main() -> None:
             "player_team_context_file": player_context_destination.name,
             "player_team_rows": len(player_team_context),
         }
-        destination.with_suffix(".meta.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        write_text(
+            json.dumps(metadata, indent=2) + "\n",
+            destination.with_suffix(".meta.json"),
         )
         print(f"Wrote {len(results)} players to {destination}")
         print(f"Wrote {len(context)} team-position rows to {context_destination}")

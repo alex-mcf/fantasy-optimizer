@@ -9,6 +9,16 @@ import numpy as np
 import pandas as pd
 
 from fantasyoptimizer.config.league_config import DEFAULT_LEAGUE_CONFIG, LeagueConfig
+from fantasyoptimizer.forecasting.forecaster import DEFAULT_MODEL_BLEND_WEIGHT
+
+# Candidate model shares of the market/model blend. The weight is fitted on
+# realized draft outcomes rather than on rank error: rank error keeps improving
+# as the model takes over the board, while the drafts those boards produce get
+# sharply worse, so rank error selects a policy that loses.
+POLICY_BLEND_WEIGHT_GRID = (0.0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.75, 1.0)
+POLICY_REQUIRED_COLUMNS = frozenset(
+    {"target_year", "pos", "market_rank", "predicted_rank", "actual_points"}
+)
 
 
 def _starter_targets(config: LeagueConfig) -> dict[str, int]:
@@ -238,41 +248,195 @@ def _simulate_one_draft(
     )
 
 
+def _policy_weight_points_by_season(
+    historical_players: pd.DataFrame,
+    config: LeagueConfig,
+    grid: tuple[float, ...],
+    simulations_per_year: int,
+    max_rounds: int,
+    seed: int,
+) -> dict[int, dict[float, np.ndarray]]:
+    """Score every candidate weight in every season on shared market draws.
+
+    Each season's candidates face the same slots and the same opponent behavior,
+    so the comparison between weights is paired and the market baseline cancels.
+    Per-simulation scores are kept rather than averaged, because the selection
+    rule needs the spread of the paired differences, not just their mean.
+    """
+    rng = np.random.default_rng(seed)
+    scored: dict[int, dict[float, np.ndarray]] = {}
+    for year, season in historical_players.groupby("target_year", sort=True):
+        frame = season.reset_index(drop=True)
+        rounds = min(max_rounds, len(frame) // config.league_size)
+        if rounds <= 0:
+            continue
+        columns = {}
+        for weight in grid:
+            column = f"_policy_rank_{weight}"
+            frame[column] = (1 - weight) * frame["market_rank"].astype(float) + (
+                weight * frame["predicted_rank"].astype(float)
+            )
+            columns[weight] = column
+        market_rank = frame["market_rank"].to_numpy(dtype=float)
+        spread = np.maximum(4.0, 0.12 * market_rank)
+        points: dict[float, list[float]] = {weight: [] for weight in grid}
+        for _ in range(simulations_per_year):
+            user_team = int(rng.integers(0, config.league_size))
+            market_draw = market_rank + rng.normal(0, spread)
+            for weight, column in columns.items():
+                points[weight].append(
+                    _simulate_one_draft(
+                        frame, column, user_team, rounds, market_draw, config
+                    )
+                )
+        scored[int(year)] = {
+            weight: np.asarray(values, dtype=float)
+            for weight, values in points.items()
+        }
+    return scored
+
+
+def _best_weight(
+    seasons: list[dict[float, np.ndarray]],
+    grid: tuple[float, ...],
+    default: float,
+) -> float:
+    """Pick the smallest tilt that is not measurably worse than the best one.
+
+    Taking the raw argmax overfits the selection seasons: draft outcomes are
+    noisy and a larger tilt carries more variance, so a lucky season can buy a
+    weight that then loses badly. Candidates within one standard error of the
+    best — measured on the paired, same-draw differences that produced them —
+    are treated as tied, and the most conservative of those wins.
+    """
+    if not seasons:
+        return default
+    pooled = {
+        weight: np.concatenate([season[weight] for season in seasons])
+        for weight in grid
+    }
+    means = {weight: float(values.mean()) for weight, values in pooled.items()}
+    best = max(grid, key=lambda weight: means[weight])
+    differences = {
+        weight: pooled[best] - pooled[weight] for weight in grid if weight != best
+    }
+    for weight in grid:
+        if weight == best:
+            return float(weight)
+        gap = differences[weight]
+        error = float(gap.std(ddof=1) / np.sqrt(len(gap))) if len(gap) > 1 else 0.0
+        if float(gap.mean()) <= error:
+            return float(weight)
+    return float(best)
+
+
+def policy_blend_weights(
+    historical_players: pd.DataFrame,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+    grid: tuple[float, ...] = POLICY_BLEND_WEIGHT_GRID,
+    simulations_per_year: int = 40,
+    max_rounds: int = 10,
+    seed: int = 20260815,
+    default: float = DEFAULT_MODEL_BLEND_WEIGHT,
+) -> tuple[float, dict[int, float]]:
+    """Fit the blend weight on the outcome it exists to improve: drafted lineups.
+
+    Rank error is a poor selection criterion here — it improves monotonically as
+    the model takes over the board while simulated drafts off that same board get
+    much worse — so candidates are scored on realized starting-lineup points.
+
+    Returns the weight for a prospective board, fitted on every available season,
+    and the nested weight for each backtested season, fitted only on seasons
+    before it. Both come from one scoring pass because the caller needs both.
+    """
+    if historical_players.empty or not POLICY_REQUIRED_COLUMNS.issubset(
+        historical_players.columns
+    ):
+        return default, {}
+    scored = _policy_weight_points_by_season(
+        historical_players, config, grid, simulations_per_year, max_rounds, seed
+    )
+    years = sorted(scored)
+    nested = {
+        year: _best_weight(
+            [scored[earlier] for earlier in years if earlier < year], grid, default
+        )
+        for year in years
+    }
+    return _best_weight(list(scored.values()), grid, default), nested
+
+
+def fit_policy_blend_weight(
+    historical_players: pd.DataFrame,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+    **kwargs,
+) -> float:
+    """Fit one blend weight for a prospective board on every available season."""
+    return policy_blend_weights(historical_players, config, **kwargs)[0]
+
+
+def nested_policy_blend_weights(
+    historical_players: pd.DataFrame,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+    **kwargs,
+) -> dict[int, float]:
+    """Fit each season's weight using only strictly earlier seasons.
+
+    Without this the weight is chosen on the same seasons the policy is scored
+    on, which flatters every reported draft-simulation result.
+    """
+    return policy_blend_weights(historical_players, config, **kwargs)[1]
+
+
 def simulate_historical_draft_strategies(
     historical_players: pd.DataFrame,
     config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
     simulations_per_year: int = 250,
     max_rounds: int = 10,
-    model_weight: float = 0.25,
+    model_weight: float | None = None,
+    season_weights: dict[int, float] | None = None,
     seed: int = 20260815,
 ) -> pd.DataFrame:
     """Compare conservative-edge, pure-model, and ADP draft policies.
 
     Opponent selections are sampled around historical ADP. Each paired simulation
     gives every policy the same draft slot and market draw, then scores the best
-    realized starting lineup. The edge policy gives ADP 75% weight by default,
-    preventing useful disagreement signals from replacing the market wholesale.
-    This omits waivers and weekly start/sit decisions.
+    realized starting lineup. The edge policy keeps the market in charge and only
+    tilts toward the model, preventing useful disagreement signals from replacing
+    the market wholesale. Its weight is fitted per season on strictly earlier
+    seasons unless a fixed `model_weight` or already fitted `season_weights` are
+    passed, so the simulated lift is not the product of a weight chosen on the
+    same seasons it is scored on. This omits waivers and weekly start/sit
+    decisions.
     """
-    required = {
-        "target_year",
-        "pos",
-        "market_rank",
-        "predicted_rank",
-        "actual_points",
-    }
-    if historical_players.empty or not required.issubset(historical_players.columns):
+    if historical_players.empty or not POLICY_REQUIRED_COLUMNS.issubset(
+        historical_players.columns
+    ):
         return pd.DataFrame()
     rng = np.random.default_rng(seed)
+    if model_weight is not None:
+        nested_weights: dict[int, float] = {}
+    elif season_weights is not None:
+        nested_weights = season_weights
+    else:
+        nested_weights = nested_policy_blend_weights(
+            historical_players, config, max_rounds=max_rounds, seed=seed
+        )
     rows: list[dict[str, object]] = []
     all_edge: list[float] = []
     all_pure: list[float] = []
     all_market: list[float] = []
+    year_weights: list[float] = []
     for year, season in historical_players.groupby("target_year", sort=True):
         frame = season.reset_index(drop=True)
+        season_weight = (
+            float(model_weight)
+            if model_weight is not None
+            else float(nested_weights.get(int(year), DEFAULT_MODEL_BLEND_WEIGHT))
+        )
         frame["edge_policy_rank"] = (
-            (1 - model_weight) * frame["market_rank"]
-            + model_weight * frame["predicted_rank"]
+            (1 - season_weight) * frame["market_rank"]
+            + season_weight * frame["predicted_rank"]
         )
         rounds = min(max_rounds, len(frame) // config.league_size)
         if rounds <= 0:
@@ -321,12 +485,13 @@ def simulate_historical_draft_strategies(
         all_edge.extend(edge_scores)
         all_pure.extend(pure_scores)
         all_market.extend(market_scores)
+        year_weights.append(season_weight)
         rows.append(
             {
                 "year": int(year),
                 "simulations": simulations_per_year,
                 "rounds": rounds,
-                "model_weight": model_weight,
+                "model_weight": season_weight,
                 "edge_policy_lineup_points": float(edge_values.mean()),
                 "pure_model_lineup_points": float(pure_values.mean()),
                 "market_lineup_points": float(market_values.mean()),
@@ -346,7 +511,7 @@ def simulate_historical_draft_strategies(
                 "year": "Overall",
                 "simulations": len(edge_values),
                 "rounds": np.nan,
-                "model_weight": model_weight,
+                "model_weight": float(np.mean(year_weights)),
                 "edge_policy_lineup_points": float(edge_values.mean()),
                 "pure_model_lineup_points": float(pure_values.mean()),
                 "market_lineup_points": float(market_values.mean()),

@@ -7,9 +7,15 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from fantasyoptimizer.utils.atomic import write_csv, write_text  # noqa: E402
 
 API_URL = "https://fantasyfootballcalculator.com/api/v1/adp/half-ppr"
 POSITIONS = ("QB", "RB", "WR", "TE")
@@ -81,20 +87,16 @@ def write_adp_export(
     preserve_snapshot: bool = True,
 ) -> Path | None:
     """Write the latest canonical file and an immutable timestamped snapshot."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    adp.to_csv(destination, index=False)
+    write_csv(adp, destination, index=False)
     metadata_text = json.dumps(metadata, indent=2) + "\n"
-    destination.with_suffix(".meta.json").write_text(
-        metadata_text, encoding="utf-8"
-    )
+    write_text(metadata_text, destination.with_suffix(".meta.json"))
     if not preserve_snapshot:
         return None
     fetched = datetime.fromisoformat(metadata["fetched_at_utc"])
     stamp = fetched.strftime("%Y%m%dT%H%M%SZ")
     snapshot = destination.parent / "snapshots" / f"ADP_{stamp}.csv"
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
-    adp.to_csv(snapshot, index=False)
-    snapshot.with_suffix(".meta.json").write_text(metadata_text, encoding="utf-8")
+    write_csv(adp, snapshot, index=False)
+    write_text(metadata_text, snapshot.with_suffix(".meta.json"))
     return snapshot
 
 

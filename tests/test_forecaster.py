@@ -2,10 +2,17 @@ import unittest
 
 import pandas as pd
 
+import numpy as np
+
+from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.forecasting.forecaster import (
     FEATURE_COLUMNS,
+    MODEL_PROMOTION_CAP_ROUNDS,
+    RESIDUAL_ALPHA_GRID,
+    RESIDUAL_FEATURE_COLUMNS,
     MarketResidualModel,
     RidgeModel,
+    _cap_promotions,
     add_market_features,
     add_official_role_context,
     build_features,
@@ -13,7 +20,90 @@ from fantasyoptimizer.forecasting.forecaster import (
 )
 
 
+def _residual_training_frame(signal: float, seed: int = 3) -> pd.DataFrame:
+    """Four seasons of one position whose residual features carry only noise."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for year in (2019, 2020, 2021, 2022):
+        for pick in range(1, 41):
+            row = {
+                "pos": "RB",
+                "target_year": year,
+                "adp_avg": float(pick),
+                "actual_points": 260.0 - 3.0 * pick + rng.normal(0, 20),
+            }
+            for column in RESIDUAL_FEATURE_COLUMNS:
+                row[column] = float(rng.normal(0, 1))
+            row["weighted_ppg"] += signal * (40 - pick)
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
 class ForecasterTests(unittest.TestCase):
+    def test_residual_penalty_tightens_when_the_features_are_noise(self):
+        noise_frame = _residual_training_frame(signal=0.0)
+        signal_frame = _residual_training_frame(signal=0.6)
+        noise_only = MarketResidualModel().fit(
+            noise_frame, noise_frame["actual_points"]
+        )
+        informative = MarketResidualModel().fit(
+            signal_frame, signal_frame["actual_points"]
+        )
+        # With nothing to learn, the fitted penalty is stronger and the model
+        # barely moves off the market instead of inventing an edge.
+        self.assertGreater(
+            noise_only.residual_alpha_["RB"], informative.residual_alpha_["RB"]
+        )
+        self.assertLess(
+            noise_only.predict_components(noise_frame)["market_adjustment"]
+            .abs()
+            .mean(),
+            informative.predict_components(signal_frame)["market_adjustment"]
+            .abs()
+            .mean(),
+        )
+        self.assertIn(noise_only.residual_alpha_["RB"], RESIDUAL_ALPHA_GRID)
+
+    def test_extreme_promotions_are_bounded_but_ordinary_ones_are_not(self):
+        config = LeagueConfig(league_size=12, qb=1, rb=2, wr=2, te=1, flex=1)
+        size = 180
+        board = pd.DataFrame(
+            {
+                "player": [f"player {index}" for index in range(size)],
+                "model_rank": range(1, size + 1),
+                "market_rank": range(1, size + 1),
+            }
+        )
+        # One last-round player the model wants at pick 1, and one ordinary
+        # two-round bargain that the guard has no business touching.
+        board.loc[0, "market_rank"] = 158
+        board.loc[39, "market_rank"] = 64
+        capped = _cap_promotions(board["model_rank"], board["market_rank"], config)
+        board["capped"] = capped
+        limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
+        self.assertLessEqual(int((board["market_rank"] - board["capped"]).max()), limit)
+        self.assertGreaterEqual(int(board.loc[0, "capped"]), 158 - limit)
+        # The ordinary bargain is still ranked where the model put it.
+        self.assertLessEqual(int(board.loc[39, "capped"]), 40)
+        self.assertEqual(sorted(capped.tolist()), list(range(1, size + 1)))
+
+    def test_market_sample_features_are_comparable_across_seasons(self):
+        frame = pd.DataFrame(
+            [
+                {"pos": "RB", "target_year": 2023, "adp_avg": 10.0, "timesdrafted": 300},
+                {"pos": "RB", "target_year": 2023, "adp_avg": 20.0, "timesdrafted": 400},
+                {"pos": "RB", "target_year": 2025, "adp_avg": 10.0, "timesdrafted": 30},
+                {"pos": "RB", "target_year": 2025, "adp_avg": 20.0, "timesdrafted": 40},
+            ]
+        )
+        featured = add_market_features(frame)
+        early = featured[featured["target_year"] == 2023]["market_log_samples"]
+        late = featured[featured["target_year"] == 2025]["market_log_samples"]
+        # Draft counts collapsed between these seasons; their shape did not.
+        self.assertAlmostEqual(float(early.mean()), float(late.mean()), places=6)
+        self.assertAlmostEqual(float(early.std()), float(late.std()), places=6)
+
+
     def test_official_role_context_is_explanatory_and_matches_by_id(self):
         forecast = pd.DataFrame(
             [

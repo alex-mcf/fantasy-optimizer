@@ -3,6 +3,7 @@ import streamlit as st
 
 from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.forecasting.forecaster import (
+    MODEL_PROMOTION_CAP_ROUNDS,
     backtest_draft_value,
     backtest_forecaster,
     build_training_examples,
@@ -11,9 +12,15 @@ from fantasyoptimizer.forecasting.forecaster import (
     forecast_season,
     segment_draft_value,
 )
-from fantasyoptimizer.market import PLATFORM_OPTIONS, apply_platform_adp, parse_platform_adp
+from fantasyoptimizer.market import (
+    PLATFORM_OPTIONS,
+    apply_platform_adp,
+    parse_platform_adp,
+    unmatched_platform_players,
+)
 from fantasyoptimizer.optimizer import (
     build_draft_recommendations,
+    policy_blend_weights,
     simulate_historical_draft_strategies,
     snake_pick_numbers,
 )
@@ -53,16 +60,33 @@ def load_analysis(years: tuple[int, ...], config: LeagueConfig):
 
 
 @st.cache_data
-def load_forecast(target_year: int, config: LeagueConfig):
+def load_training(target_year: int):
+    """Cache the league-independent work so roster changes stay cheap.
+
+    Building training examples and the point backtest is most of the pipeline's
+    runtime and none of it depends on the league configuration, so it is keyed on
+    the target year alone.
+    """
     training = build_training_examples(target_year - 1)
-    forecast = forecast_season(target_year, config, training_examples=training)
     backtest = backtest_forecaster(target_year - 1, training_examples=training)
+    return training, backtest
+
+
+@st.cache_data
+def load_forecast(target_year: int, config: LeagueConfig):
+    training, backtest = load_training(target_year)
     value_backtest, value_players = backtest_draft_value(
         target_year - 1, config, training_examples=training
     )
+    model_weight, season_weights = policy_blend_weights(value_players, config)
+    forecast = forecast_season(
+        target_year, config, training_examples=training, model_weight=model_weight
+    )
     forecast = calibrate_edge_probabilities(forecast, value_players, config)
     segments = segment_draft_value(value_players, config)
-    draft_simulation = simulate_historical_draft_strategies(value_players, config)
+    draft_simulation = simulate_historical_draft_strategies(
+        value_players, config, season_weights=season_weights
+    )
     return (
         forecast,
         backtest,
@@ -81,7 +105,7 @@ if not year_options:
 with st.sidebar:
     st.header("Draft room setup")
     platform = st.selectbox("Draft platform", PLATFORM_OPTIONS)
-    st.selectbox("Scoring format", ["Half-PPR (validated)"])
+    st.caption("Scoring format: half-PPR, the only format this model is trained on.")
     league_size = st.number_input("Teams", min_value=4, max_value=20, value=12)
     draft_slot = st.number_input(
         "Your draft slot", min_value=1, max_value=int(league_size), value=1
@@ -183,6 +207,7 @@ if forecast_years:
             ) = load_forecast(
                 target_year, league_config
             )
+        unmatched_uploads = unmatched_platform_players(forecast, platform_adp)
         forecast = apply_platform_adp(forecast, platform_adp, platform)
         platform_matches = int(forecast["platform_match"].sum())
 
@@ -203,6 +228,35 @@ if forecast_years:
             f"Selected-platform coverage: {platform_matches}/{len(forecast)}. "
             "The model remains trained on consistent FFC history; selected-platform "
             "ADP controls live price and availability."
+        )
+        if not unmatched_uploads.empty:
+            st.warning(
+                f"{len(unmatched_uploads)} uploaded {platform} rankings were not "
+                "matched to a modeled player and are not on the board.",
+                icon="⚠️",
+            )
+            with st.expander(f"Unmatched {platform} uploads"):
+                st.dataframe(unmatched_uploads, width="stretch", hide_index=True)
+        promotion_limit = MODEL_PROMOTION_CAP_ROUNDS * league_config.league_size
+        guarded = int(
+            (
+                forecast["market_rank"] - forecast["uncapped_model_rank"]
+                > promotion_limit
+            ).sum()
+        )
+        if guarded:
+            st.caption(
+                f"{guarded} players were ranked more than {MODEL_PROMOTION_CAP_ROUNDS} "
+                f"rounds ({promotion_limit} picks) ahead of market ADP and were "
+                "pulled back to that limit. The table below shows where the model "
+                "had them before the guard."
+            )
+        blend_weight = float(forecast["blend_model_weight"].iloc[0])
+        st.caption(
+            f"Actionable ADP blends {1 - blend_weight:.0%} market rank with "
+            f"{blend_weight:.0%} model rank. That weight is fitted on simulated "
+            "draft outcomes in past seasons, and each backtested season below is "
+            "scored with a weight fitted only on seasons before it."
         )
         role_coverage = int(forecast["official_role_known"].sum())
         if role_coverage:
@@ -268,6 +322,7 @@ if forecast_years:
         forecast_display = forecast_filtered[
             [
                 "model_rank",
+                "uncapped_model_rank",
                 "player",
                 "pos",
                 "team",
@@ -279,8 +334,6 @@ if forecast_years:
                 "forecast_points",
                 "market_points",
                 "market_adjustment",
-                "player_only_points",
-                "context_adjustment",
                 "forecast_ppg",
                 "forecast_games",
                 "position_rank",
@@ -320,6 +373,7 @@ if forecast_years:
         ].rename(
             columns={
                 "model_rank": "Model Rank",
+                "uncapped_model_rank": "Model Rank Before Guard",
                 "player": "Player",
                 "pos": "Position",
                 "team": "Team",
@@ -331,8 +385,6 @@ if forecast_years:
                 "forecast_points": "Forecast Points",
                 "market_points": "Market-Implied Points",
                 "market_adjustment": "Predicted Market Error",
-                "player_only_points": "Player-Only Points",
-                "context_adjustment": "Team Context Adjustment",
                 "forecast_ppg": "Forecast PPG",
                 "forecast_games": "Forecast Games",
                 "position_rank": "Position Rank",
@@ -601,7 +653,6 @@ if forecast_years:
                 "model_favorite",
                 "favorite_model_rank",
                 "favorite_forecast_points",
-                "favorite_context_adjustment",
                 "favorite_role_share",
                 "candidates",
             ]
@@ -620,7 +671,6 @@ if forecast_years:
                 "model_favorite": "Model Favorite",
                 "favorite_model_rank": "Favorite Model Rank",
                 "favorite_forecast_points": "Favorite Forecast Points",
-                "favorite_context_adjustment": "Favorite Context Adjustment",
                 "favorite_role_share": "Favorite Prior Opportunity Share",
                 "candidates": "Current Candidates",
             }
@@ -643,7 +693,6 @@ if forecast_years:
             "Last-Year Teammate Opportunities",
             "Last-Year Top-Two Points",
             "Favorite Forecast Points",
-            "Favorite Context Adjustment",
         ]:
             outlook_display[column] = outlook_display[column].round(1)
         st.dataframe(outlook_display, hide_index=True, width="stretch")
@@ -659,7 +708,7 @@ if forecast_years:
                     "mae": "Point MAE",
                     "market_mae": "Market Point MAE",
                     "market_mae_lift": "Point MAE Improvement vs Market",
-                    "player_only_mae": "Player-Only MAE",
+                    "context_model_mae": "Context-Model MAE",
                     "context_mae_lift": "Context MAE Improvement",
                     "rank_correlation": "Rank Correlation",
                 }
@@ -668,7 +717,7 @@ if forecast_years:
                 "Point MAE",
                 "Market Point MAE",
                 "Point MAE Improvement vs Market",
-                "Player-Only MAE",
+                "Context-Model MAE",
                 "Context MAE Improvement",
             ]:
                 backtest_display[column] = backtest_display[column].round(1)
@@ -720,6 +769,9 @@ if forecast_years:
                     "market_rank_mae": "Market Rank MAE",
                     "model_rank_mae": "Model Rank MAE",
                     "rank_mae_improvement": "Rank MAE Improvement",
+                    "context_model_rank_mae": "Context-Model Rank MAE",
+                    "context_rank_mae_lift": "Context Rank MAE Improvement",
+                    "top_board_market_drift": "Top-60 Drift From Market",
                     "market_correlation": "Market Correlation",
                     "signal_correlation": "Signal Correlation",
                 }
@@ -741,6 +793,9 @@ if forecast_years:
                 "Market Rank MAE",
                 "Model Rank MAE",
                 "Rank MAE Improvement",
+                "Context-Model Rank MAE",
+                "Context Rank MAE Improvement",
+                "Top-60 Drift From Market",
                 "Market Correlation",
                 "Signal Correlation",
             ]:
@@ -772,9 +827,11 @@ if forecast_years:
             st.caption(
                 "Paired snake-draft simulations use the same draft slot and sampled "
                 "opponent behavior for each policy, then score the best realized "
-                "starting lineup. The actionable policy keeps 75% of ADP and applies "
-                "25% of the model adjustment. Pure model ranking is shown because it "
-                "performed poorly and should not be used as a complete draft board."
+                "starting lineup. The actionable policy keeps most of ADP and applies "
+                "a model tilt whose weight was fitted on earlier seasons only, so no "
+                "season is scored with a weight chosen on its own results. Pure model "
+                "ranking is shown because it performed poorly and should not be used "
+                "as a complete draft board."
             )
             simulation_overall = draft_simulation[
                 draft_simulation["year"] == "Overall"

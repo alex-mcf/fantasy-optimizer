@@ -1,13 +1,59 @@
 import unittest
 
+import numpy as np
 import pandas as pd
 
 from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.optimizer import (
     build_draft_recommendations,
+    fit_policy_blend_weight,
+    nested_policy_blend_weights,
     simulate_historical_draft_strategies,
     snake_pick_numbers,
 )
+from fantasyoptimizer.forecasting.forecaster import DEFAULT_MODEL_BLEND_WEIGHT
+
+
+def _seasons_where_the_model_is_right() -> pd.DataFrame:
+    """Three seasons in which model rank matches results and ADP is backwards."""
+    positions = ["QB", "RB", "WR", "TE"] * 4
+    rows = []
+    for year in (2022, 2023, 2024):
+        for index, position in enumerate(positions):
+            rows.append(
+                {
+                    "target_year": year,
+                    "player": f"{year} player {index}",
+                    "pos": position,
+                    "market_rank": len(positions) - index,
+                    "predicted_rank": index + 1,
+                    "actual_rank": index + 1,
+                    "actual_points": float(200 - 5 * index),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def _seasons_where_the_market_is_right() -> pd.DataFrame:
+    """Three seasons in which ADP matches results and model rank is noise."""
+    rng = np.random.default_rng(11)
+    positions = ["QB", "RB", "WR", "TE"] * 4
+    rows = []
+    for year in (2022, 2023, 2024):
+        scrambled = rng.permutation(len(positions)) + 1
+        for index, position in enumerate(positions):
+            rows.append(
+                {
+                    "target_year": year,
+                    "player": f"{year} player {index}",
+                    "pos": position,
+                    "market_rank": index + 1,
+                    "predicted_rank": int(scrambled[index]),
+                    "actual_rank": index + 1,
+                    "actual_points": float(200 - 5 * index),
+                }
+            )
+    return pd.DataFrame(rows)
 
 
 class DraftRecommendationTests(unittest.TestCase):
@@ -62,6 +108,32 @@ class DraftRecommendationTests(unittest.TestCase):
         self.assertEqual(result.iloc[-1]["year"], "Overall")
         self.assertIn("edge_policy_lift", result)
         self.assertIn("pure_model_lift", result)
+
+    def test_blend_weight_is_fitted_on_draft_outcomes(self):
+        config = LeagueConfig(league_size=4, qb=1, rb=1, wr=1, te=1, flex=0)
+        weight = fit_policy_blend_weight(
+            _seasons_where_the_model_is_right(), config, simulations_per_year=10
+        )
+        self.assertGreaterEqual(weight, 0.5)
+
+    def test_blend_weight_stays_small_when_the_model_rank_is_noise(self):
+        config = LeagueConfig(league_size=4, qb=1, rb=1, wr=1, te=1, flex=0)
+        weight = fit_policy_blend_weight(
+            _seasons_where_the_market_is_right(), config, simulations_per_year=25
+        )
+        # Nothing to gain by tilting, so any apparent gain is luck, and the
+        # one-standard-error rule should refuse to pay for luck.
+        self.assertLessEqual(weight, DEFAULT_MODEL_BLEND_WEIGHT)
+
+    def test_nested_blend_weight_never_uses_its_own_season(self):
+        config = LeagueConfig(league_size=4, qb=1, rb=1, wr=1, te=1, flex=0)
+        weights = nested_policy_blend_weights(
+            _seasons_where_the_model_is_right(), config, simulations_per_year=10
+        )
+        self.assertEqual(sorted(weights), [2022, 2023, 2024])
+        # The first season has no earlier evidence, so it cannot be tuned at all.
+        self.assertEqual(weights[2022], DEFAULT_MODEL_BLEND_WEIGHT)
+        self.assertGreaterEqual(weights[2024], 0.5)
     def test_board_distinguishes_urgent_value_from_player_who_can_wait(self):
         forecast = pd.DataFrame(
             [

@@ -47,8 +47,6 @@ class HistoricalPipelineTests(unittest.TestCase):
                     "draft_pick",
                     "forecast_ppg",
                     "forecast_games",
-                    "player_only_points",
-                    "context_adjustment",
                     "model_rank",
                     "adp_avg",
                     "value_gap",
@@ -64,6 +62,11 @@ class HistoricalPipelineTests(unittest.TestCase):
             .any()
         )
         self.assertTrue(forecast["model_rank"].is_monotonic_increasing)
+        # No player may be ranked more than three rounds ahead of the market.
+        self.assertLessEqual(
+            int((forecast["market_rank"] - forecast["model_rank"]).max()), 36
+        )
+        self.assertIn("uncapped_model_rank", forecast)
         self.assertIn("official_depth_rank", forecast)
         self.assertIn("role_agreement", forecast)
         self.assertFalse(backtest.empty)

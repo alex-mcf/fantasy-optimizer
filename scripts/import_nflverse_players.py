@@ -7,9 +7,15 @@ from datetime import datetime, timezone
 import io
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from fantasyoptimizer.utils.atomic import write_csv, write_text  # noqa: E402
 
 PLAYERS_URL = (
     "https://github.com/nflverse/nflverse-data/releases/download/players/players.csv"
@@ -63,8 +69,7 @@ def main() -> None:
         / "players.csv"
     )
     players = build_player_export(download_players())
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    players.to_csv(destination, index=False)
+    write_csv(players, destination, index=False)
     metadata = {
         "source": "nflverse players v2",
         "source_url": PLAYERS_URL,
@@ -73,8 +78,8 @@ def main() -> None:
         "players": len(players),
         "fields": list(players.columns),
     }
-    destination.with_suffix(".meta.json").write_text(
-        json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+    write_text(
+        json.dumps(metadata, indent=2) + "\n", destination.with_suffix(".meta.json")
     )
     print(f"Wrote {len(players)} player metadata rows to {destination}")
 

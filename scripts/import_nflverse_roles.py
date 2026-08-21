@@ -8,9 +8,15 @@ from datetime import datetime, time, timezone
 import io
 import json
 from pathlib import Path
+import sys
 
 import pandas as pd
 import requests
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from fantasyoptimizer.utils.atomic import write_csv, write_text  # noqa: E402
 
 DEPTH_URL = (
     "https://github.com/nflverse/nflverse-data/releases/download/"
@@ -225,18 +231,14 @@ def write_role_export(
     role: pd.DataFrame, destination: Path, metadata: dict[str, object]
 ) -> Path:
     """Write the current role file and preserve an immutable fetched snapshot."""
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    role.to_csv(destination, index=False)
+    write_csv(role, destination, index=False)
     metadata_text = json.dumps(metadata, indent=2) + "\n"
-    destination.with_suffix(".meta.json").write_text(
-        metadata_text, encoding="utf-8"
-    )
+    write_text(metadata_text, destination.with_suffix(".meta.json"))
     fetched = datetime.fromisoformat(str(metadata["fetched_at_utc"]))
     stamp = fetched.strftime("%Y%m%dT%H%M%SZ")
     snapshot = destination.parent / "snapshots" / f"Role_{stamp}.csv"
-    snapshot.parent.mkdir(parents=True, exist_ok=True)
-    role.to_csv(snapshot, index=False)
-    snapshot.with_suffix(".meta.json").write_text(metadata_text, encoding="utf-8")
+    write_csv(role, snapshot, index=False)
+    write_text(metadata_text, snapshot.with_suffix(".meta.json"))
     return snapshot
 
 

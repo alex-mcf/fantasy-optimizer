@@ -18,6 +18,7 @@ from scripts.import_nflverse_roles import (
     build_role_export,
     write_role_export,
 )
+from fantasyoptimizer.utils.atomic import write_csv
 
 
 class NflverseImporterTests(unittest.TestCase):
@@ -294,6 +295,22 @@ class NflverseImporterTests(unittest.TestCase):
         ].iloc[0]
         self.assertEqual(moved["player_points"], 8.0)
         self.assertEqual(moved["player_opportunities"], 4)
+
+
+class AtomicWriteTests(unittest.TestCase):
+    def test_failed_write_leaves_the_existing_archive_intact(self):
+        class ExplodingFrame(pd.DataFrame):
+            def to_csv(self, *args, **kwargs):
+                raise OSError("connection dropped mid-write")
+
+        with TemporaryDirectory() as directory:
+            destination = Path(directory) / "2026" / "Post_2026_Results(HPPR).csv"
+            write_csv(pd.DataFrame([{"player": "keep me"}]), destination, index=False)
+            with self.assertRaises(OSError):
+                write_csv(ExplodingFrame(), destination, index=False)
+            self.assertIn("keep me", destination.read_text(encoding="utf-8"))
+            leftovers = [path.name for path in destination.parent.iterdir()]
+            self.assertEqual(leftovers, [destination.name])
 
 
 if __name__ == "__main__":

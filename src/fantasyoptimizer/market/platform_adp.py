@@ -7,6 +7,7 @@ import re
 import numpy as np
 import pandas as pd
 
+from fantasyoptimizer.forecasting.forecaster import DEFAULT_MODEL_BLEND_WEIGHT
 from fantasyoptimizer.utils.data_loader import _normalize_player_key
 
 PLATFORM_OPTIONS = (
@@ -127,8 +128,16 @@ def apply_platform_adp(
     board["draft_market_rank"] = board["draft_adp"].rank(
         method="first", ascending=True
     ).astype(int)
+    # Reuse the blend weight the forecast was fitted with, so the live board and
+    # the backtested policy tilt off the market by the same amount.
+    model_weight = (
+        float(board["blend_model_weight"].iloc[0])
+        if "blend_model_weight" in board and not board.empty
+        else DEFAULT_MODEL_BLEND_WEIGHT
+    )
     board["platform_actionable_adp"] = (
-        0.75 * board["draft_market_rank"] + 0.25 * board["fair_adp"]
+        (1 - model_weight) * board["draft_market_rank"]
+        + model_weight * board["fair_adp"]
     ).round().astype(int)
     board["platform_value_gap"] = (
         board["draft_market_rank"] - board["fair_adp"]
@@ -140,3 +149,20 @@ def apply_platform_adp(
         board["platform_match"], platform_name, "FFC fallback"
     )
     return board
+
+
+def unmatched_platform_players(
+    forecast: pd.DataFrame, platform_adp: pd.DataFrame | None
+) -> pd.DataFrame:
+    """List uploaded rankings the model board never used.
+
+    Silently dropping these hides both name-normalization misses and players the
+    model has no ADP row for, so the draft room surfaces the count instead.
+    """
+    if platform_adp is None or platform_adp.empty:
+        return pd.DataFrame(columns=["platform_player", "pos", "draft_adp"])
+    modeled = set(forecast["player_key"]) if "player_key" in forecast else set()
+    unmatched = platform_adp[~platform_adp["player_key"].isin(modeled)]
+    return unmatched[["platform_player", "pos", "draft_adp"]].sort_values(
+        "draft_adp", ignore_index=True
+    )

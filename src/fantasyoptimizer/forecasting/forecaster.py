@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from heapq import heappop, heappush
 from pathlib import Path
 
 import numpy as np
@@ -79,6 +80,58 @@ CONTEXT_FEATURE_COLUMNS = [
 
 FEATURE_COLUMNS = PLAYER_FEATURE_COLUMNS + CONTEXT_FEATURE_COLUMNS
 
+# What the residual layer is allowed to see. It is deliberately far narrower than
+# the full feature list. TE has ~130 training rows and QB ~160, so a 49-feature
+# residual fit on them is under-determined; the resulting noise lands at the top
+# of the board, which is exactly where a draft is decided, while whole-pool MAE
+# and rank correlation stay flat and hide it. Position dummies are omitted because
+# each residual model is already fitted within one position, where they are
+# constant and contribute nothing. Context features are omitted because they were
+# measured and did not pay for themselves — see backtest_draft_value, which keeps
+# scoring a context-augmented model so that claim stays under test.
+RESIDUAL_FEATURE_COLUMNS = [
+    "weighted_ppg",
+    "lag1_ppg",
+    "trend",
+    "weighted_games",
+    "lag1_games",
+    "weighted_opp",
+    "weighted_ppo",
+    "age",
+    "experience",
+    "rookie",
+    "history_seasons",
+]
+
+# The same residual layer plus team/role/environment context, fitted only so the
+# backtests can report what including context would have been worth.
+CONTEXT_RESIDUAL_FEATURE_COLUMNS = RESIDUAL_FEATURE_COLUMNS + CONTEXT_FEATURE_COLUMNS
+
+# Candidate residual penalties, searched per position. The top of the grid is
+# large enough to switch the residual layer off when it earns nothing, and it uses
+# that option: QB selects OFF in every season since 2021. The floor of 300 is a
+# real constraint rather than a formality — WR selects it every year, and adding
+# lower rungs lets WR fall to 30, which costs about 14 lineup points a season and
+# raises top-of-board drift. Selection is scored on whole-pool error, which cannot
+# see that damage, so the floor is where that judgement is encoded. Do not lower
+# it without re-running the draft simulations.
+RESIDUAL_ALPHA_GRID = (300.0, 1000.0, 3000.0, 10000.0, 30000.0, 1e9)
+
+# A model rank may not sit more than this many rounds ahead of a player's market
+# rank. The residual layer is linear, so it cannot say "efficient, but on almost
+# no volume", and nothing else bounds how far a prediction may travel from the
+# market: in 2024 it put a TE with the position's best points-per-opportunity on
+# 40 opportunities at rank 1 against a market rank of 158. Shrinking the rate
+# features toward their position prior does not help — the model standardizes its
+# features, so a monotone rescale is undone — but refusing the extreme promotion
+# does.
+MODEL_PROMOTION_CAP_ROUNDS = 3
+
+# How far into the board the drift metric looks. Whole-pool error averages over
+# ~150 players and cannot see a model going noisy where drafts are decided, so
+# the backtest tracks deviation from the market across the early rounds too.
+TOP_BOARD_RANKS = 60
+
 MARKET_FEATURE_COLUMNS = [
     "adp_avg",
     "market_log_adp",
@@ -91,6 +144,21 @@ MARKET_FEATURE_COLUMNS = [
     "market_stddev",
     "market_range",
 ]
+
+# Features derived from how many mock drafts an ADP row is built from. Their raw
+# scale is not comparable across seasons, so they are standardized within a
+# season before the model sees them.
+MARKET_SAMPLE_FEATURE_COLUMNS = [
+    "market_log_samples",
+    "market_stddev",
+    "market_range",
+]
+
+# The actionable board is a blend of market rank and model rank. This is only the
+# fallback share; the weight is fitted on earlier seasons by
+# fantasyoptimizer.optimizer.fit_policy_blend_weight, which scores candidates on
+# realized draft outcomes rather than on rank error.
+DEFAULT_MODEL_BLEND_WEIGHT = 0.25
 
 
 @dataclass
@@ -123,6 +191,28 @@ class RidgeModel:
         values = frame[list(self.feature_columns)].to_numpy(dtype=float)
         design = np.column_stack([np.ones(len(values)), (values - self.mean_) / self.scale_])
         return design @ self.coefficients_
+
+
+def _standardize_within_season(
+    values: pd.Series, seasons: pd.Series | None
+) -> pd.Series:
+    """Z-score a market-sample feature inside its own season.
+
+    Mock-draft sample counts collapsed over time — the median row went from 365
+    drafts in 2023 to 33 in 2025 — so a model trained on early seasons is asked
+    to predict from values far outside the range it ever saw. The shape of the
+    distribution within a season is the part that carries signal and transfers.
+    """
+
+    def scale(group: pd.Series) -> pd.Series:
+        spread = float(group.std())
+        if not np.isfinite(spread) or spread == 0:
+            return pd.Series(0.0, index=group.index)
+        return (group - float(group.mean())) / spread
+
+    if seasons is None:
+        return scale(values)
+    return values.groupby(seasons, group_keys=False).apply(scale)
 
 
 def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
@@ -191,6 +281,9 @@ def add_market_features(frame: pd.DataFrame) -> pd.DataFrame:
     featured["market_log_samples"] = np.log1p(samples.fillna(0).clip(lower=0))
     featured["market_stddev"] = deviation.fillna(0).clip(lower=0)
     featured["market_range"] = (low - high).fillna(0).clip(lower=0)
+    seasons = featured["target_year"] if "target_year" in featured else None
+    for column in MARKET_SAMPLE_FEATURE_COLUMNS:
+        featured[column] = _standardize_within_season(featured[column], seasons)
     return featured
 
 
@@ -277,16 +370,68 @@ def add_official_role_context(
     return featured
 
 
+def _select_residual_alpha(
+    group: pd.DataFrame,
+    target: pd.Series,
+    feature_columns: tuple[str, ...],
+    grid: tuple[float, ...],
+) -> float:
+    """Choose a residual penalty by holding out whole seasons inside the window.
+
+    A fixed penalty is the wrong shape for this problem: the same absolute ridge
+    term shrinks proportionally less as seasons accumulate, so a value tuned on a
+    two-season window quietly lets the model drift further from the market every
+    year. Selecting per position also respects that QB and TE have roughly a third
+    of the rows RB and WR do. The grid's top end is large enough to switch the
+    residual layer off, which is a legitimate answer when it earns nothing.
+
+    Error is measured over the whole holdout season. Restricting it to early-ADP
+    players was tried, on the theory that whole-pool error is what hid the
+    original decay: it selected worse penalties, because a season contributes only
+    a few dozen early rows per position and the resulting choice was mostly noise.
+    The top-of-board question is answered by `top_board_market_drift` in the
+    backtest instead, where it is measured rather than optimized against.
+    """
+    if "target_year" not in group or group["target_year"].nunique() < 2:
+        return grid[len(grid) // 2]
+    seasons = sorted(group["target_year"].unique())
+    values = target.to_numpy(dtype=float)
+    years = group["target_year"].to_numpy()
+    best_alpha = grid[len(grid) // 2]
+    best_error = np.inf
+    for alpha in grid:
+        errors: list[float] = []
+        for held_out in seasons:
+            holdout = years == held_out
+            if holdout.all() or not holdout.any():
+                continue
+            model = RidgeModel(alpha=float(alpha), feature_columns=feature_columns)
+            model.fit(group.loc[~holdout], pd.Series(values[~holdout]))
+            errors.append(
+                float(np.abs(values[holdout] - model.predict(group.loc[holdout])).mean())
+            )
+        if not errors:
+            continue
+        error = float(np.mean(errors))
+        if error < best_error - 1e-9:
+            best_alpha = float(alpha)
+            best_error = error
+    return best_alpha
+
+
 @dataclass
 class MarketResidualModel:
     """Use ADP as a baseline, then learn position-specific market mistakes."""
 
     alpha_market: float = 100.0
-    alpha_residual: float = 300.0
-    residual_feature_columns: tuple[str, ...] = tuple(FEATURE_COLUMNS)
+    alpha_residual: float | None = None
+    residual_alpha_grid: tuple[float, ...] = RESIDUAL_ALPHA_GRID
+    residual_feature_columns: tuple[str, ...] = tuple(RESIDUAL_FEATURE_COLUMNS)
+    market_feature_columns: tuple[str, ...] = tuple(MARKET_FEATURE_COLUMNS)
     market_models_: dict[str, RidgeModel] = field(default_factory=dict)
     residual_models_: dict[str, RidgeModel] = field(default_factory=dict)
     error_scale_: dict[str, float] = field(default_factory=dict)
+    residual_alpha_: dict[str, float] = field(default_factory=dict)
 
     def fit(self, frame: pd.DataFrame, target: pd.Series) -> "MarketResidualModel":
         prepared = add_market_features(frame)
@@ -294,20 +439,33 @@ class MarketResidualModel:
         self.market_models_.clear()
         self.residual_models_.clear()
         self.error_scale_.clear()
+        self.residual_alpha_.clear()
         for position, group in prepared.groupby("pos"):
             position_target = aligned_target.loc[group.index]
             market_model = RidgeModel(
                 alpha=self.alpha_market,
-                feature_columns=tuple(MARKET_FEATURE_COLUMNS),
+                feature_columns=tuple(self.market_feature_columns),
             ).fit(group, position_target)
             market_prediction = market_model.predict(group)
+            residual_target = position_target - market_prediction
+            alpha = (
+                float(self.alpha_residual)
+                if self.alpha_residual is not None
+                else _select_residual_alpha(
+                    group,
+                    residual_target,
+                    tuple(self.residual_feature_columns),
+                    self.residual_alpha_grid,
+                )
+            )
             residual_model = RidgeModel(
-                alpha=self.alpha_residual,
+                alpha=alpha,
                 feature_columns=self.residual_feature_columns,
-            ).fit(group, position_target - market_prediction)
+            ).fit(group, residual_target)
             prediction = market_prediction + residual_model.predict(group)
             self.market_models_[position] = market_model
             self.residual_models_[position] = residual_model
+            self.residual_alpha_[position] = alpha
             scale = float(np.std(position_target.to_numpy() - prediction))
             self.error_scale_[position] = max(scale, 1.0)
         return self
@@ -857,7 +1015,11 @@ def build_training_examples(
     return pd.concat(examples, ignore_index=True)
 
 
-def _add_value_ranks(forecast: pd.DataFrame, config: LeagueConfig) -> pd.DataFrame:
+def _add_value_ranks(
+    forecast: pd.DataFrame,
+    config: LeagueConfig,
+    model_weight: float = DEFAULT_MODEL_BLEND_WEIGHT,
+) -> pd.DataFrame:
     forecast = forecast.copy()
     replacements = config.replacement_ranks()
     forecast["replacement_points"] = 0.0
@@ -875,17 +1037,60 @@ def _add_value_ranks(forecast: pd.DataFrame, config: LeagueConfig) -> pd.DataFra
     forecast = forecast.sort_values(
         ["model_value", "forecast_points"], ascending=False, ignore_index=True
     )
-    forecast["model_rank"] = range(1, len(forecast) + 1)
+    forecast["uncapped_model_rank"] = range(1, len(forecast) + 1)
     forecast["market_rank"] = (
         forecast["adp_avg"].rank(method="first", ascending=True).astype(int)
     )
+    forecast["model_rank"] = _cap_promotions(
+        forecast["uncapped_model_rank"], forecast["market_rank"], config
+    )
+    forecast = forecast.sort_values("model_rank", ignore_index=True)
     forecast["fair_adp"] = forecast["model_rank"]
+    forecast["blend_model_weight"] = float(model_weight)
     forecast["actionable_adp"] = (
-        0.75 * forecast["market_rank"] + 0.25 * forecast["fair_adp"]
+        (1 - model_weight) * forecast["market_rank"]
+        + model_weight * forecast["fair_adp"]
     ).round().astype(int)
     forecast["raw_adp_gap"] = forecast["adp_avg"] - forecast["model_rank"]
     forecast["value_gap"] = forecast["market_rank"] - forecast["model_rank"]
     return forecast
+
+
+def _cap_promotions(
+    model_rank: pd.Series, market_rank: pd.Series, config: LeagueConfig
+) -> pd.Series:
+    """Re-rank a board so nobody sits more than a few rounds ahead of the market.
+
+    This bounds the model's disagreement rather than damping it: a player the
+    model likes still moves up, just not from the last round to the first. It
+    binds almost entirely on tight ends, where replacement-level value and market
+    price disagree most, and leaves the rest of the board untouched.
+
+    Each player gets an earliest allowed slot, and the board is filled slot by
+    slot from whoever is both eligible and best liked. Simply clamping the sort
+    key is not enough: re-ranking closes the gaps the clamp opened, which lets a
+    capped player drift back above the bound.
+    """
+    limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
+    size = len(model_rank)
+    ranks = model_rank.to_numpy(dtype=float)
+    floors = np.clip(market_rank.to_numpy(dtype=float) - limit, 1, max(size, 1))
+    by_floor = sorted(range(size), key=lambda index: (floors[index], ranks[index]))
+    eligible: list[tuple[float, int]] = []
+    placed = np.zeros(size, dtype=int)
+    waiting = 0
+    for slot in range(1, size + 1):
+        while waiting < size and floors[by_floor[waiting]] <= slot:
+            heappush(eligible, (ranks[by_floor[waiting]], by_floor[waiting]))
+            waiting += 1
+        if not eligible:
+            # Every remaining player is held back past this slot; release the
+            # one that becomes eligible soonest so the board stays contiguous.
+            heappush(eligible, (ranks[by_floor[waiting]], by_floor[waiting]))
+            waiting += 1
+        _, index = heappop(eligible)
+        placed[index] = slot
+    return pd.Series(placed, index=model_rank.index, dtype=int)
 
 
 def _rank_by_replacement_value(
@@ -918,8 +1123,14 @@ def forecast_season(
     config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
     data_dir: Path | str = DEFAULT_DATA_DIR,
     training_examples: pd.DataFrame | None = None,
+    model_weight: float | None = None,
 ) -> pd.DataFrame:
-    """Forecast a season by adjusting the market for player/context evidence."""
+    """Forecast a season by adjusting the market for player/context evidence.
+
+    The actionable blend weight should come from
+    fantasyoptimizer.optimizer.fit_policy_blend_weight, which fits it on earlier
+    seasons; the conservative default stands in when none is supplied.
+    """
     prior_years = [year for year in available_result_years(data_dir) if year < target_year]
     if target_year not in available_adp_years(data_dir):
         raise FileNotFoundError(f"No {target_year} preseason ADP file is available.")
@@ -928,10 +1139,9 @@ def forecast_season(
         if training_examples is not None
         else build_training_examples(max(prior_years), data_dir)
     )
+    if model_weight is None:
+        model_weight = DEFAULT_MODEL_BLEND_WEIGHT
     model = MarketResidualModel().fit(training, training["actual_points"])
-    player_only_model = MarketResidualModel(
-        residual_feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
-    ).fit(training, training["actual_points"])
     ppg_model = MarketResidualModel().fit(training, training["actual_ppg"])
     games_model = MarketResidualModel().fit(training, training["actual_games"])
     candidates = load_adp(target_year, data_dir)
@@ -963,12 +1173,6 @@ def forecast_season(
     features["market_adjustment"] = (
         features["forecast_points"] - features["market_points"]
     ).round(1)
-    features["player_only_points"] = np.clip(
-        player_only_model.predict(features), 0, 500
-    ).round(1)
-    features["context_adjustment"] = (
-        features["forecast_points"] - features["player_only_points"]
-    ).round(1)
     features["forecast_ppg"] = np.clip(ppg_model.predict(features), 0, 40).round(1)
     features["forecast_games"] = np.clip(
         games_model.predict(features), 0, 18
@@ -979,7 +1183,7 @@ def forecast_season(
     features["confidence"] = features["history_seasons"].map(
         {0: "Rookie / no NFL history", 1: "Low", 2: "Medium", 3: "High"}
     )
-    return _add_value_ranks(features, config)
+    return _add_value_ranks(features, config, model_weight)
 
 
 def build_team_position_outlook(forecast: pd.DataFrame) -> pd.DataFrame:
@@ -1014,9 +1218,6 @@ def build_team_position_outlook(forecast: pd.DataFrame) -> pd.DataFrame:
                 "model_favorite": favorite["player"],
                 "favorite_model_rank": int(favorite["model_rank"]),
                 "favorite_forecast_points": float(favorite["forecast_points"]),
-                "favorite_context_adjustment": float(
-                    favorite["context_adjustment"]
-                ),
                 "favorite_role_share": float(favorite["lag1_opportunity_share"]),
                 "candidates": ", ".join(ordered["player"].head(3)),
                 "candidate_count": len(ordered),
@@ -1046,20 +1247,18 @@ def backtest_forecaster(
         if train["target_year"].nunique() < 2 or test.empty:
             continue
         model = MarketResidualModel().fit(train, train["actual_points"])
-        player_only_model = MarketResidualModel(
-            residual_feature_columns=tuple(PLAYER_FEATURE_COLUMNS)
+        context_model = MarketResidualModel(
+            residual_feature_columns=tuple(CONTEXT_RESIDUAL_FEATURE_COLUMNS)
         ).fit(train, train["actual_points"])
         market_components = model.predict_components(test)
         test["predicted"] = np.clip(model.predict(test), 0, 500)
         test["market_predicted"] = np.clip(
             market_components["market_prediction"], 0, 500
         )
-        test["player_only_predicted"] = np.clip(
-            player_only_model.predict(test), 0, 500
-        )
+        test["context_predicted"] = np.clip(context_model.predict(test), 0, 500)
         mae = float((test["actual_points"] - test["predicted"]).abs().mean())
-        player_only_mae = float(
-            (test["actual_points"] - test["player_only_predicted"]).abs().mean()
+        context_mae = float(
+            (test["actual_points"] - test["context_predicted"]).abs().mean()
         )
         market_mae = float(
             (test["actual_points"] - test["market_predicted"]).abs().mean()
@@ -1071,8 +1270,8 @@ def backtest_forecaster(
                 "mae": mae,
                 "market_mae": market_mae,
                 "market_mae_lift": market_mae - mae,
-                "player_only_mae": player_only_mae,
-                "context_mae_lift": player_only_mae - mae,
+                "context_model_mae": context_mae,
+                "context_mae_lift": mae - context_mae,
                 "rank_correlation": float(
                     test[["actual_points", "predicted"]].corr(method="spearman").iloc[0, 1]
                 ),
@@ -1081,24 +1280,18 @@ def backtest_forecaster(
     return pd.DataFrame(rows)
 
 
-def backtest_draft_value(
-    through_year: int,
-    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
-    data_dir: Path | str = DEFAULT_DATA_DIR,
-    training_examples: pd.DataFrame | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Test whether one-round model bargains subsequently beat their market rank.
+def evaluate_expanding_windows(
+    examples: pd.DataFrame, config: LeagueConfig = DEFAULT_LEAGUE_CONFIG
+) -> pd.DataFrame:
+    """Rank every season with models that only saw strictly earlier seasons.
 
     Both model and realized ranks use value over a league-specific replacement
     player. Market rank is normalized within the same modeled QB/RB/WR/TE pool,
     which keeps the comparison fair when an ADP source also contains kickers,
-    defenses, or unmatched rows.
+    defenses, or unmatched rows. A context-augmented model is scored alongside so
+    the decision to leave team/role/environment features out of the shipped model
+    stays under measurement rather than becoming an assumption.
     """
-    examples = (
-        training_examples
-        if training_examples is not None
-        else build_training_examples(through_year, data_dir)
-    )
     evaluated: list[pd.DataFrame] = []
     target_years = sorted(examples["target_year"].unique())
     for target_year in target_years:
@@ -1108,7 +1301,11 @@ def backtest_draft_value(
             continue
 
         model = MarketResidualModel().fit(train, train["actual_points"])
+        context_model = MarketResidualModel(
+            residual_feature_columns=tuple(CONTEXT_RESIDUAL_FEATURE_COLUMNS)
+        ).fit(train, train["actual_points"])
         test["predicted_points"] = np.clip(model.predict(test), 0, 500)
+        test["context_points"] = np.clip(context_model.predict(test), 0, 500)
         test["market_rank"] = (
             test["adp_avg"].rank(method="first", ascending=True).astype(int)
         )
@@ -1120,6 +1317,17 @@ def backtest_draft_value(
             "predicted_value",
             "predicted_rank",
         )
+        predicted["uncapped_predicted_rank"] = predicted["predicted_rank"]
+        predicted["predicted_rank"] = _cap_promotions(
+            predicted["uncapped_predicted_rank"], predicted["market_rank"], config
+        )
+        context_ranked = _rank_by_replacement_value(
+            test,
+            "context_points",
+            config,
+            "context_value",
+            "context_rank",
+        )
         realized = _rank_by_replacement_value(
             test,
             "actual_points",
@@ -1128,23 +1336,35 @@ def backtest_draft_value(
             "actual_rank",
         )
         identity = ["player_key", "pos"]
-        evaluation = predicted[
-            identity
-            + [
-                "player",
-                "team",
-                "target_year",
-                "adp_avg",
-                "market_rank",
-                "predicted_points",
-                "predicted_value",
-                "predicted_rank",
+        evaluation = (
+            predicted[
+                identity
+                + [
+                    "player",
+                    "team",
+                    "target_year",
+                    "adp_avg",
+                    "market_rank",
+                    "predicted_points",
+                    "predicted_value",
+                    "predicted_rank",
+                    "uncapped_predicted_rank",
+                ]
             ]
-        ].merge(
-            realized[identity + ["actual_points", "actual_value", "actual_rank"]],
-            on=identity,
-            how="inner",
-            validate="one_to_one",
+            .merge(
+                context_ranked[
+                    identity + ["context_points", "context_value", "context_rank"]
+                ],
+                on=identity,
+                how="inner",
+                validate="one_to_one",
+            )
+            .merge(
+                realized[identity + ["actual_points", "actual_value", "actual_rank"]],
+                on=identity,
+                how="inner",
+                validate="one_to_one",
+            )
         )
         evaluation["predicted_rank_surplus"] = (
             evaluation["market_rank"] - evaluation["predicted_rank"]
@@ -1167,11 +1387,27 @@ def backtest_draft_value(
         evaluated.append(evaluation)
 
     if not evaluated:
-        return pd.DataFrame(), pd.DataFrame()
-
-    player_results = pd.concat(evaluated, ignore_index=True).sort_values(
+        return pd.DataFrame()
+    return pd.concat(evaluated, ignore_index=True).sort_values(
         ["target_year", "predicted_rank"], ignore_index=True
     )
+
+
+def backtest_draft_value(
+    through_year: int,
+    config: LeagueConfig = DEFAULT_LEAGUE_CONFIG,
+    data_dir: Path | str = DEFAULT_DATA_DIR,
+    training_examples: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Test whether one-round model bargains subsequently beat their market rank."""
+    examples = (
+        training_examples
+        if training_examples is not None
+        else build_training_examples(through_year, data_dir)
+    )
+    player_results = evaluate_expanding_windows(examples, config)
+    if player_results.empty:
+        return pd.DataFrame(), pd.DataFrame()
 
     def summarize(group: pd.DataFrame, year: int | str) -> dict[str, object]:
         bargains = group[group["bargain_flag"]]
@@ -1223,6 +1459,25 @@ def backtest_draft_value(
             "rank_mae_improvement": float(
                 (group["actual_rank"] - group["market_rank"]).abs().mean()
                 - (group["actual_rank"] - group["predicted_rank"]).abs().mean()
+            ),
+            "context_model_rank_mae": float(
+                (group["actual_rank"] - group["context_rank"]).abs().mean()
+            ),
+            "context_rank_mae_lift": float(
+                (group["actual_rank"] - group["predicted_rank"]).abs().mean()
+                - (group["actual_rank"] - group["context_rank"]).abs().mean()
+            ),
+            "top_board_market_drift": float(
+                (
+                    group.loc[
+                        group["market_rank"] <= TOP_BOARD_RANKS, "predicted_rank"
+                    ]
+                    - group.loc[
+                        group["market_rank"] <= TOP_BOARD_RANKS, "market_rank"
+                    ]
+                )
+                .abs()
+                .mean()
             ),
             "market_correlation": float(
                 group[["market_rank", "actual_rank"]]
