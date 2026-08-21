@@ -1,10 +1,19 @@
 # Fantasy Draft Value Forecaster
 
-FantasyOptimizer combines a consistent half-PPR history with a transparent
-upcoming-season forecast. It provides two related views:
+FantasyOptimizer is a draft-day board: a filterable player list that prices the
+upcoming season against current mock-draft ADP, plus the tools you use at a pick.
+ADP is the baseline, not the enemy — the model's job is to say where that
+baseline is wrong, and to show you the evidence for each call.
 
-- retrospective value: preseason mock ADP versus completed results; and
-- forecast value: a market-aware fair rank versus current mock-draft ADP.
+The app has three tabs:
+
+- **Board** — every modeled player, filtered by position, call strength,
+  confidence, team, or the rounds they are going in. Columns start at the eight
+  a draft needs and expand on request; selecting a player explains the call.
+- **Draft room** — your pick, what is gone, what your roster still needs, and a
+  shortlist that accounts for who will survive to your next pick.
+- **Evidence** — the backtests, the draft simulation, and the measured limits of
+  the model, kept behind the board rather than in front of it.
 
 ## Setup
 
@@ -200,17 +209,17 @@ date. These fields are explanatory only: the upstream source changed after 2024,
 and older files lack timestamps that prove alignment with historical ADP, so the
 forecast does not train on them yet.
 
-The live draft decision board accepts the current pick, next pick, drafted
-players, and roster counts. It estimates whether each available player will
-survive to the next selection using mock-draft variability, then labels choices
-as draft now, consider now, target while waiting, wait, or pass. This is an
-auditable heuristic.
+The draft room accepts the current pick, next pick, drafted players, and roster
+counts. It estimates whether each available player will survive to the next
+selection using mock-draft variability, then labels choices as draft now,
+consider now, target while waiting, wait, or pass. This is an auditable
+heuristic. Players marked drafted there also drop off the board.
 
-The draft-room sidebar now controls league size, starting roster, superflex,
-draft slot, and total snake-draft rounds. Snake selections are calculated from
-the user's slot, with manual pick-number overrides for keepers or traded picks.
-The supported scoring definition remains half-PPR; changing roster settings
-changes replacement value, not the underlying historical scoring data.
+The sidebar controls league size, starting roster, superflex, draft slot, and
+total snake-draft rounds. Snake selections are calculated from your slot, with
+manual pick-number overrides for keepers or traded picks. The supported scoring
+definition remains half-PPR; changing roster settings changes replacement value,
+not the underlying historical scoring data.
 
 Fantasy Football Calculator remains the consistent market used to train and
 backtest the predictor. For ESPN, Yahoo, Sleeper, NFL.com, or another draft room,
@@ -291,7 +300,8 @@ results shape how the board should be read:
 
 ## Historical score
 
-The retrospective tabs calculate realized value over same-season ADP cost,
-value over a league-specific replacement player, and multi-season volatility.
-Older seasons receive half the weight of the following season. This score is a
-hindsight evaluation, separate from the upcoming-season forecast.
+`fantasyoptimizer.scoring` still calculates realized value over same-season ADP
+cost, value over a league-specific replacement player, and multi-season
+volatility, with each older season weighted half as much as the one after it. It
+is a hindsight evaluation rather than a draft-day tool, so it no longer has a
+place in the app; import it directly if you want that view.

@@ -1,3 +1,13 @@
+"""Draft-day board: one filterable player list, plus the tools you use at a pick.
+
+The forecast is a second opinion on a mock-draft ADP, so the app is arranged the
+way that opinion gets used: scan a list, filter it to the players you can
+actually take, and check the evidence when a call looks surprising. Everything
+that justifies the board lives behind the Evidence tab rather than in front of
+it.
+"""
+
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -24,11 +34,7 @@ from fantasyoptimizer.optimizer import (
     simulate_historical_draft_strategies,
     snake_pick_numbers,
 )
-from fantasyoptimizer.scoring.scoring_engine import (
-    SUPPORTED_POSITIONS,
-    compute_player_season_scores,
-    compute_scores,
-)
+from fantasyoptimizer.scoring.scoring_engine import SUPPORTED_POSITIONS
 from fantasyoptimizer.utils.data_loader import (
     available_adp_snapshots,
     available_adp_years,
@@ -38,27 +44,61 @@ from fantasyoptimizer.utils.data_loader import (
     load_adp_metadata,
 )
 
-st.set_page_config(page_title="Fantasy Draft Value Forecaster", layout="wide")
-st.title("Fantasy Draft Value Forecaster")
-st.caption(
-    "Half-PPR market-error forecasting and live draft decision support"
-)
-st.info(
-    "ADP is the market baseline. Position-specific models use each player's own "
-    "recent production, availability, and age to predict where that baseline is "
-    "wrong. Team and role context is shown for judgement but is not a model input: "
-    "it was measured and did not improve the forecast.",
-    icon="ℹ️",
-)
+st.set_page_config(page_title="Draft Board", layout="wide")
 
+CONFIDENCE_ORDER = ["High", "Medium", "Low", "Rookie / no NFL history"]
 
-@st.cache_data
-def load_analysis(years: tuple[int, ...], config: LeagueConfig):
-    return (
-        compute_scores(list(years), config),
-        compute_player_season_scores(list(years), config),
-        data_quality_report(list(years)),
-    )
+# Column groups, in the order a draft-day scan wants them. "Decision" is what the
+# board shows by default; the rest are opt-in, because a 48-column table is not a
+# thing anyone reads under a pick clock.
+DECISION_COLUMNS = {
+    "player": "Player",
+    "pos": "Pos",
+    "team": "Team",
+    "draft_adp": "ADP",
+    "platform_actionable_adp": "Take At",
+    "rounds_moved": "Rounds Moved",
+    "edge_probability": "Beat ADP %",
+    "confidence": "Confidence",
+}
+PROJECTION_COLUMNS = {
+    "forecast_points": "Proj Points",
+    "forecast_ppg": "Proj PPG",
+    "forecast_games": "Proj Games",
+    "model_value": "VORP",
+    "position_rank": "Pos Rank",
+}
+EVIDENCE_COLUMNS = {
+    "weighted_ppg": "Prior PPG",
+    "weighted_ppo": "Prior Pts/Opp",
+    "weighted_opportunity_share": "Prior Opp Share %",
+    "official_depth_rank": "Depth Rank",
+    "official_starter": "Listed Starter",
+    "market_room_rank": "Room ADP Rank",
+    "market_room_size": "Room Size",
+    "age": "Age",
+    "experience": "Exp",
+}
+EXTRA_COLUMNS = {
+    "model_rank": "Model Rank",
+    "uncapped_model_rank": "Model Rank (Pre-Guard)",
+    "fair_adp": "Fair ADP",
+    "adp_avg": "FFC ADP",
+    "market_rank": "Market Rank",
+    "platform_value_gap": "Value Gap",
+    "market_points": "Market-Implied Points",
+    "market_adjustment": "Predicted Market Error",
+    "team_context_rank": "Team Context Rank",
+    "role_agreement": "Market / Depth Agreement",
+    "official_roster_status": "Roster Status",
+    "changed_team": "Changed Team",
+    "draft_round": "NFL Draft Round",
+    "draft_pick": "NFL Draft Pick",
+    "timesdrafted": "Mock Samples",
+    "edge_confidence": "Edge Confidence",
+    "platform_source": "ADP Source",
+}
+PERCENT_COLUMNS = {"Beat ADP %", "Prior Opp Share %", "Available Next Pick %"}
 
 
 @st.cache_data
@@ -99,980 +139,608 @@ def load_forecast(target_year: int, config: LeagueConfig):
     )
 
 
+def display_table(frame: pd.DataFrame, columns: dict[str, str]) -> pd.DataFrame:
+    """Rename and tidy a slice of the board for display."""
+    present = {key: label for key, label in columns.items() if key in frame}
+    table = frame[list(present)].rename(columns=present)
+    if "Player" in table:
+        table["Player"] = table["Player"].astype(str).str.title()
+    for column in PERCENT_COLUMNS & set(table.columns):
+        table[column] = (100 * table[column]).round(0)
+    return table
+
+
 year_options = available_years()
-if not year_options:
-    st.error("No complete seasons were found. Follow the data setup steps in README.md.")
+forecast_years = sorted(set(available_adp_years()) - set(year_options))
+if not year_options or not forecast_years:
+    st.error(
+        "No complete seasons or no upcoming-season ADP was found. Follow the data "
+        "setup steps in README.md."
+    )
     st.stop()
+target_year = max(forecast_years)
 
 with st.sidebar:
-    st.header("Draft room setup")
+    st.subheader("League")
     platform = st.selectbox("Draft platform", PLATFORM_OPTIONS)
-    st.caption("Scoring format: half-PPR, the only format this model is trained on.")
-    league_size = st.number_input("Teams", min_value=4, max_value=20, value=12)
-    draft_slot = st.number_input(
-        "Your draft slot", min_value=1, max_value=int(league_size), value=1
+    league_size = int(st.number_input("Teams", min_value=4, max_value=20, value=12))
+    draft_slot = int(
+        st.number_input("Your draft slot", min_value=1, max_value=league_size, value=1)
     )
-    draft_rounds = st.number_input(
-        "Draft rounds", min_value=5, max_value=30, value=15
+    draft_rounds = int(
+        st.number_input("Draft rounds", min_value=5, max_value=30, value=15)
     )
+
+    with st.expander("Starting lineup", expanded=False):
+        qb = int(st.number_input("QB", min_value=0, max_value=3, value=1))
+        rb = int(st.number_input("RB", min_value=0, max_value=5, value=2))
+        wr = int(st.number_input("WR", min_value=0, max_value=5, value=2))
+        te = int(st.number_input("TE", min_value=0, max_value=3, value=1))
+        flex = int(st.number_input("FLEX", min_value=0, max_value=4, value=1))
+        superflex = int(st.number_input("Superflex", min_value=0, max_value=2, value=0))
+        st.caption("Kickers and defenses are not modeled. Half-PPR only.")
+
     platform_adp = None
     if platform != PLATFORM_OPTIONS[0]:
-        st.caption(
-            "Upload your platform's current ranking export. Unmatched players "
-            "fall back to the consistent FFC market."
-        )
-        platform_file = st.file_uploader(
-            f"{platform} rankings CSV", type=["csv"], key="platform_adp"
-        )
-        st.download_button(
-            "Download upload template",
-            "Player,Position,ADP\nExample Player,RB,24.5\n",
-            file_name="platform_adp_template.csv",
-            mime="text/csv",
-        )
-        if platform_file is not None:
-            try:
-                platform_adp = parse_platform_adp(pd.read_csv(platform_file))
-                st.success(f"Loaded {len(platform_adp)} platform rankings.")
-            except (ValueError, pd.errors.ParserError) as error:
-                st.error(str(error))
-
-    st.subheader("Starting lineup")
-    qb = st.number_input("Starting QB", min_value=0, max_value=3, value=1)
-    rb = st.number_input("Starting RB", min_value=0, max_value=5, value=2)
-    wr = st.number_input("Starting WR", min_value=0, max_value=5, value=2)
-    te = st.number_input("Starting TE", min_value=0, max_value=3, value=1)
-    flex = st.number_input("FLEX", min_value=0, max_value=4, value=1)
-    superflex = st.number_input("Superflex", min_value=0, max_value=2, value=0)
-    st.caption("Kickers and defenses are not currently modeled.")
-    if int(league_size) != 12:
-        st.warning(
-            "Replacement value will adjust to this league size, but the historical "
-            "FFC market baseline is from 12-team drafts."
-        )
-    if int(superflex) > 0 and platform == PLATFORM_OPTIONS[0]:
-        st.warning(
-            "FFC baseline ADP is not superflex ADP. Upload your superflex platform "
-            "rankings for useful draft-room prices and availability."
-        )
-    with st.expander("Historical evaluation settings"):
-        years = st.multiselect("Seasons", options=year_options, default=year_options)
-
-if not years:
-    st.warning("Select at least one complete season.")
-    st.stop()
+        with st.expander(f"{platform} rankings", expanded=True):
+            st.caption(
+                "Upload your platform's export so prices and availability match "
+                "your room. Unmatched players fall back to the FFC market."
+            )
+            platform_file = st.file_uploader(
+                "Rankings CSV", type=["csv"], key="platform_adp"
+            )
+            st.download_button(
+                "Template",
+                "Player,Position,ADP\nExample Player,RB,24.5\n",
+                file_name="platform_adp_template.csv",
+                mime="text/csv",
+            )
+            if platform_file is not None:
+                try:
+                    platform_adp = parse_platform_adp(pd.read_csv(platform_file))
+                    st.success(f"Loaded {len(platform_adp)} rankings.")
+                except (ValueError, pd.errors.ParserError) as error:
+                    st.error(str(error))
 
 league_config = LeagueConfig(
-    league_size=int(league_size),
-    qb=int(qb),
-    rb=int(rb),
-    wr=int(wr),
-    te=int(te),
-    flex=int(flex),
-    superflex=int(superflex),
+    league_size=league_size,
+    qb=qb,
+    rb=rb,
+    wr=wr,
+    te=te,
+    flex=flex,
+    superflex=superflex,
 )
 with st.sidebar:
     replacements = league_config.replacement_ranks()
     st.caption(
-        "Estimated replacement ranks: "
+        "Replacement level: "
         + ", ".join(f"{position}{rank}" for position, rank in replacements.items())
     )
-
-with st.spinner("Calculating historical draft value..."):
-    summary, player_seasons, quality = load_analysis(tuple(years), league_config)
-
-forecast_years = sorted(set(available_adp_years()) - set(year_options))
-tab_names = ["Player summary", "Season details", "Data quality & method"]
-if forecast_years:
-    tab_names.insert(0, f"{max(forecast_years)} Forecast")
-tabs = st.tabs(tab_names)
-if forecast_years:
-    forecast_tab, summary_tab, season_tab, quality_tab = tabs
-else:
-    summary_tab, season_tab, quality_tab = tabs
-
-if forecast_years:
-    with forecast_tab:
-        target_year = max(forecast_years)
-        adp_metadata = load_adp_metadata(target_year)
-        adp_fetched_at = str(adp_metadata.get("fetched_at_utc", "Unknown"))
-        snapshot_count = len(available_adp_snapshots(target_year))
-        adp_movement = build_adp_movement(target_year)
-        with st.spinner(f"Training chronological model and forecasting {target_year}..."):
-            (
-                forecast,
-                backtest,
-                value_backtest,
-                value_backtest_players,
-                value_segments,
-                draft_simulation,
-            ) = load_forecast(
-                target_year, league_config
-            )
-        unmatched_uploads = unmatched_platform_players(forecast, platform_adp)
-        forecast = apply_platform_adp(forecast, platform_adp, platform)
-        platform_matches = int(forecast["platform_match"].sum())
-
-        st.subheader(f"{target_year} model value versus {platform} ADP")
+    if league_size != 12:
         st.caption(
-            f"Market snapshot fetched: {adp_fetched_at} · Preserved snapshots: "
-            f"{snapshot_count}"
+            "Replacement value follows this league size, but the historical FFC "
+            "market baseline is from 12-team drafts."
         )
+    if superflex > 0 and platform == PLATFORM_OPTIONS[0]:
         st.caption(
-            "Positive platform value gap means the model's fair ADP is earlier "
-            "than the selected platform market. The model starts from consistent "
-            "FFC ADP, then adjusts it with each player's own recent production, "
-            "availability, and age. Room and context fields are shown for "
-            "judgement, not used as model inputs; they are derived from the ADP "
-            "pool and are not an official NFL depth chart."
-        )
-        st.caption(
-            f"Selected-platform coverage: {platform_matches}/{len(forecast)}. "
-            "The model remains trained on consistent FFC history; selected-platform "
-            "ADP controls live price and availability."
-        )
-        if not unmatched_uploads.empty:
-            st.warning(
-                f"{len(unmatched_uploads)} uploaded {platform} rankings were not "
-                "matched to a modeled player and are not on the board.",
-                icon="⚠️",
-            )
-            with st.expander(f"Unmatched {platform} uploads"):
-                st.dataframe(unmatched_uploads, width="stretch", hide_index=True)
-        promotion_limit = MODEL_PROMOTION_CAP_ROUNDS * league_config.league_size
-        guarded = int(
-            (
-                forecast["market_rank"] - forecast["uncapped_model_rank"]
-                > promotion_limit
-            ).sum()
-        )
-        if guarded:
-            st.caption(
-                f"{guarded} players were ranked more than {MODEL_PROMOTION_CAP_ROUNDS} "
-                f"rounds ({promotion_limit} picks) ahead of market ADP and were "
-                "pulled back to that limit. The table below shows where the model "
-                "had them before the guard."
-            )
-        blend_weight = float(forecast["blend_model_weight"].iloc[0])
-        st.caption(
-            f"Actionable ADP blends {1 - blend_weight:.0%} market rank with "
-            f"{blend_weight:.0%} model rank. That weight is fitted on simulated "
-            "draft outcomes in past seasons, and each backtested season below is "
-            "scored with a weight fitted only on seasons before it."
-        )
-        role_coverage = int(forecast["official_role_known"].sum())
-        if role_coverage:
-            role_snapshot = forecast.loc[
-                forecast["official_role_known"].eq(1), "official_role_snapshot"
-            ].iloc[0]
-            st.caption(
-                f"Official role snapshot: {role_snapshot} · matched {role_coverage}/"
-                f"{len(forecast)} players. It is displayed for draft decisions but "
-                "is not yet a trained model input."
-            )
-        else:
-            st.caption(
-                f"Official {target_year} role data is not installed. Run "
-                f"`python scripts/import_nflverse_roles.py {target_year}`."
-            )
-        fc_search_col, fc_position_col, fc_confidence_col = st.columns([3, 1, 1])
-        fc_search = fc_search_col.text_input(
-            "Forecast player search", placeholder="Player name"
-        )
-        fc_position = fc_position_col.selectbox(
-            "Forecast position", ["ALL", *SUPPORTED_POSITIONS]
-        )
-        fc_confidence = fc_confidence_col.selectbox(
-            "Forecast confidence",
-            ["ALL", "High", "Medium", "Low", "Rookie / no NFL history"],
-        )
-        forecast_filtered = forecast.copy()
-        if fc_search:
-            forecast_filtered = forecast_filtered[
-                forecast_filtered["player"].str.contains(fc_search, case=False, na=False)
-            ]
-        if fc_position != "ALL":
-            forecast_filtered = forecast_filtered[forecast_filtered["pos"] == fc_position]
-        if fc_confidence != "ALL":
-            forecast_filtered = forecast_filtered[
-                forecast_filtered["confidence"] == fc_confidence
-            ]
-
-        value_count = int(
-            (forecast_filtered["platform_value_gap"] >= 2 * league_size).sum()
-        )
-        metric_1, metric_2, metric_3 = st.columns(3)
-        metric_1.metric("Players modeled", len(forecast_filtered))
-        metric_2.metric("Platform values ≥2 rounds", value_count)
-        metric_3.metric("Training result seasons", len(year_options))
-        st.caption(
-            "Two rounds is the threshold worth acting on. Historically, players "
-            "the model moved up a single round beat their ADP 49% of the time "
-            "against a 42% base rate — inside the noise — while two-round calls "
-            "hit 63%, three-round 69%, and four-plus 90%. Position and draft "
-            "stage matter as much as size: late-round tight ends and quarterbacks "
-            "are where this model has earned its keep (TE bargains after round 7 "
-            "beat their ADP in 89-95% of cases), and quarterbacks it promotes "
-            "into the first three rounds are its worst category. Run "
-            "`python scripts/evaluate_adp_comparison.py` for the full breakdown."
+            "FFC baseline ADP is not superflex ADP. Upload your platform's "
+            "rankings for useful superflex prices."
         )
 
-        chart = forecast_filtered[
-            ["player", "pos", "draft_adp", "model_rank"]
-        ].rename(
-            columns={"draft_adp": "Selected Platform ADP", "model_rank": "Model Rank"}
-        )
-        if not chart.empty:
-            st.scatter_chart(
-                chart,
-                x="Selected Platform ADP",
-                y="Model Rank",
-                color="pos",
-                size=40,
-                height=350,
-            )
+with st.spinner(f"Training on prior seasons and forecasting {target_year}..."):
+    (
+        forecast,
+        backtest,
+        value_backtest,
+        value_players,
+        value_segments,
+        draft_simulation,
+    ) = load_forecast(target_year, league_config)
 
-        forecast_display = forecast_filtered[
-            [
-                "model_rank",
-                "uncapped_model_rank",
-                "player",
-                "pos",
-                "team",
-                "age",
-                "experience",
-                "rookie",
-                "draft_round",
-                "draft_pick",
-                "forecast_points",
-                "market_points",
-                "market_adjustment",
-                "forecast_ppg",
-                "forecast_games",
-                "position_rank",
-                "model_value",
-                "team_context_rank",
-                "weighted_ppo",
-                "weighted_opportunity_share",
-                "team_pos_weighted_opportunities",
-                "team_pos_other_weighted_points",
-                "same_team_last_year",
-                "changed_team",
-                "market_room_rank",
-                "market_room_size",
-                "market_room_leader",
-                "market_room_adp_gap",
-                "official_depth_rank",
-                "official_starter",
-                "official_roster_status",
-                "official_depth_position",
-                "role_agreement",
-                "adp_avg",
-                "market_rank",
-                "fair_adp",
-                "actionable_adp",
-                "value_gap",
-                "draft_platform",
-                "draft_adp",
-                "draft_market_rank",
-                "platform_actionable_adp",
-                "platform_value_gap",
-                "platform_source",
-                "edge_probability",
-                "edge_confidence",
-                "timesdrafted",
-                "confidence",
-            ]
-        ].rename(
-            columns={
-                "model_rank": "Model Rank",
-                "uncapped_model_rank": "Model Rank Before Guard",
-                "player": "Player",
-                "pos": "Position",
-                "team": "Team",
-                "age": "Age",
-                "experience": "NFL Experience",
-                "rookie": "Rookie",
-                "draft_round": "NFL Draft Round",
-                "draft_pick": "NFL Draft Pick",
-                "forecast_points": "Forecast Points",
-                "market_points": "Market-Implied Points",
-                "market_adjustment": "Predicted Market Error",
-                "forecast_ppg": "Forecast PPG",
-                "forecast_games": "Forecast Games",
-                "position_rank": "Position Rank",
-                "model_value": "Forecast VORP",
-                "team_context_rank": "Team Position Context Rank",
-                "weighted_ppo": "Prior Points / Opportunity",
-                "weighted_opportunity_share": "Prior Opportunity Share %",
-                "team_pos_weighted_opportunities": "3-Year Team Position Opportunities",
-                "team_pos_other_weighted_points": "3-Year Teammate Points",
-                "same_team_last_year": "Same Team",
-                "changed_team": "Changed Team",
-                "market_room_rank": "Same-Team Position ADP Rank",
-                "market_room_size": "Same-Team Position ADP Candidates",
-                "market_room_leader": "Room ADP Leader",
-                "market_room_adp_gap": "ADP Picks Behind Room Leader",
-                "official_depth_rank": "Official Depth Rank",
-                "official_starter": "Official Starter",
-                "official_roster_status": "Official Roster Status",
-                "official_depth_position": "Official Depth Position",
-                "role_agreement": "Market / Depth Agreement",
-                "adp_avg": "Mock ADP",
-                "market_rank": "Normalized Market Rank",
-                "fair_adp": "Fair ADP",
-                "actionable_adp": "Actionable ADP",
-                "value_gap": "Expected Pick Value",
-                "draft_platform": "Selected Platform",
-                "draft_adp": "Selected Platform ADP",
-                "draft_market_rank": "Selected Platform Market Rank",
-                "platform_actionable_adp": "Platform Actionable ADP",
-                "platform_value_gap": "Platform Value Gap",
-                "platform_source": "Platform Data Source",
-                "edge_probability": "Probability Beat ADP %",
-                "edge_confidence": "Edge Confidence",
-                "timesdrafted": "Mock Samples",
-                "confidence": "History Confidence",
-            }
+unmatched_uploads = unmatched_platform_players(forecast, platform_adp)
+forecast = apply_platform_adp(forecast, platform_adp, platform)
+forecast["rounds_moved"] = (
+    (forecast["draft_market_rank"] - forecast["model_rank"]) / league_size
+).round(1)
+promotion_limit = MODEL_PROMOTION_CAP_ROUNDS * league_size
+forecast["guarded"] = (
+    forecast["market_rank"] - forecast["uncapped_model_rank"] > promotion_limit
+)
+blend_weight = float(forecast["blend_model_weight"].iloc[0])
+adp_metadata = load_adp_metadata(target_year)
+
+st.title(f"{target_year} Draft Board")
+st.caption(
+    f"Half-PPR · {league_size}-team · pick {draft_slot} · {platform} prices · "
+    f"ADP fetched {str(adp_metadata.get('fetched_at_utc', 'unknown'))[:10]}"
+)
+
+board_tab, draft_tab, evidence_tab = st.tabs(["Board", "Draft room", "Evidence"])
+
+with board_tab:
+    drafted = set(st.session_state.get("drafted_players", []))
+    filter_row = st.columns([2, 3])
+    search = filter_row[0].text_input(
+        "Search", placeholder="Search players", label_visibility="collapsed"
+    )
+    positions = filter_row[1].pills(
+        "Positions",
+        SUPPORTED_POSITIONS,
+        selection_mode="multi",
+        default=list(SUPPORTED_POSITIONS),
+        label_visibility="collapsed",
+    )
+    call = st.pills(
+        "Call",
+        [
+            "Every player",
+            "Values 2+ rounds",
+            "Values 1+ round",
+            "Fades",
+            "Guard held back",
+        ],
+        default="Every player",
+        label_visibility="collapsed",
+    )
+
+    with st.expander("More filters"):
+        more = st.columns([2, 2, 2])
+        confidence = more[0].multiselect(
+            "Confidence", CONFIDENCE_ORDER, default=CONFIDENCE_ORDER
         )
-        forecast_display["Player"] = forecast_display["Player"].str.title()
-        forecast_display["Prior Opportunity Share %"] = (
-            100 * forecast_display["Prior Opportunity Share %"]
-        ).round(0)
-        forecast_display["Probability Beat ADP %"] = (
-            100 * forecast_display["Probability Beat ADP %"]
-        ).round(0)
-        st.dataframe(forecast_display, hide_index=True, width="stretch")
-        if role_coverage:
-            with st.expander("Market / official role disagreements"):
-                disagreements = forecast_filtered[
-                    forecast_filtered["official_role_known"].eq(1)
-                    & forecast_filtered["role_agreement"].ne("Aligned")
-                ][
-                    [
-                        "player",
-                        "pos",
-                        "team",
-                        "market_room_rank",
-                        "official_depth_rank",
-                        "official_starter",
-                        "official_roster_status",
-                        "role_agreement",
-                        "draft_adp",
-                        "platform_actionable_adp",
-                        "platform_source",
-                    ]
-                ].rename(
-                    columns={
-                        "player": "Player",
-                        "pos": "Position",
-                        "team": "Team",
-                        "market_room_rank": "ADP Room Rank",
-                        "official_depth_rank": "Official Depth Rank",
-                        "official_starter": "Official Starter",
-                        "official_roster_status": "Roster Status",
-                        "role_agreement": "Disagreement",
-                        "draft_adp": f"{platform} ADP",
-                        "platform_actionable_adp": "Actionable ADP",
-                        "platform_source": "ADP Source",
-                    }
+        teams = more[1].multiselect(
+            "Team", sorted(forecast["team"].dropna().astype(str).unique())
+        )
+        last_round = int(np.ceil(forecast["draft_adp"].max() / league_size))
+        rounds = more[2].slider(
+            "Going in rounds", 1, max(last_round, 2), (1, max(last_round, 2))
+        )
+        hide_drafted = st.checkbox(
+            "Hide players marked drafted in the draft room", value=True
+        )
+
+    board = forecast.copy()
+    if search:
+        board = board[board["player"].str.contains(search, case=False, na=False)]
+    if positions:
+        board = board[board["pos"].isin(positions)]
+    if confidence:
+        board = board[board["confidence"].isin(confidence)]
+    if teams:
+        board = board[board["team"].astype(str).isin(teams)]
+    board = board[
+        board["draft_adp"].between(
+            (rounds[0] - 1) * league_size + 1, rounds[1] * league_size
+        )
+    ]
+    if hide_drafted and drafted:
+        board = board[~board["player"].isin(drafted)]
+    if call == "Values 2+ rounds":
+        board = board[board["platform_value_gap"] >= 2 * league_size]
+    elif call == "Values 1+ round":
+        board = board[board["platform_value_gap"] >= league_size]
+    elif call == "Fades":
+        board = board[board["platform_value_gap"] <= -league_size]
+    elif call == "Guard held back":
+        board = board[board["guarded"]]
+    board = board.sort_values("platform_actionable_adp", ignore_index=True)
+
+    summary = st.columns(4)
+    summary[0].metric("Players shown", len(board))
+    summary[1].metric(
+        "Values ≥2 rounds",
+        int((board["platform_value_gap"] >= 2 * league_size).sum()),
+    )
+    summary[2].metric("Model weight", f"{blend_weight:.0%}")
+    summary[3].metric(
+        "Platform coverage", f"{int(forecast['platform_match'].sum())}/{len(forecast)}"
+    )
+
+    detail = st.segmented_control(
+        "Detail",
+        ["Decision", "+ Projection", "+ Evidence", "Everything"],
+        default="Decision",
+        label_visibility="collapsed",
+    )
+    columns = dict(DECISION_COLUMNS)
+    if detail in {"+ Projection", "Everything"}:
+        columns.update(PROJECTION_COLUMNS)
+    if detail in {"+ Evidence", "Everything"}:
+        columns.update(EVIDENCE_COLUMNS)
+    if detail == "Everything":
+        columns.update(EXTRA_COLUMNS)
+
+    if board.empty:
+        st.info("No players match these filters.")
+    else:
+        selection = st.dataframe(
+            display_table(board, columns),
+            hide_index=True,
+            width="stretch",
+            height=560,
+            on_select="rerun",
+            selection_mode="single-row",
+        )
+        st.caption(
+            "**Take At** blends market rank with the model at the fitted weight — "
+            "it is where this player is worth drafting, not where he will go. "
+            "**Rounds Moved** is how far the model disagrees with ADP. Two rounds "
+            "is the threshold worth acting on: one-round calls beat their ADP 49% "
+            "of the time against a 42% base rate, two-round calls 63%, and "
+            "four-plus 90%. Select a row for the reasoning behind a call."
+        )
+        chosen = selection.selection.rows if selection and selection.selection else []
+        if chosen:
+            player = board.iloc[chosen[0]]
+            st.divider()
+            headline = st.columns([3, 1, 1, 1, 1])
+            headline[0].markdown(
+                f"### {str(player['player']).title()}  \n"
+                f"{player['pos']} · {player['team']} · {player['confidence']}"
+            )
+            headline[1].metric("ADP", f"{player['draft_adp']:.0f}")
+            headline[2].metric("Take at", int(player["platform_actionable_adp"]))
+            headline[3].metric(
+                "Rounds moved", f"{player['rounds_moved']:+.1f}"
+            )
+            headline[4].metric(
+                "Beat ADP", f"{100 * player['edge_probability']:.0f}%"
+            )
+            why = st.columns(2)
+            why[0].markdown(
+                f"**Projection** {player['forecast_points']:.0f} points "
+                f"({player['forecast_ppg']:.1f} per game over "
+                f"{player['forecast_games']:.1f} games), VORP "
+                f"{player['model_value']:.0f}, {player['pos']}"
+                f"{int(player['position_rank'])} on this board.  \n"
+                f"**Market says** {player['market_points']:.0f} points at this ADP; "
+                f"the model adds {player['market_adjustment']:+.0f}."
+            )
+            prior = (
+                f"{player['weighted_ppg']:.1f} PPG and "
+                f"{player['weighted_ppo']:.2f} points per opportunity across "
+                f"{int(player['history_seasons'])} prior season(s)"
+                if player["history_seasons"]
+                else "no NFL history — the market baseline is doing the work"
+            )
+            role = (
+                f"listed {int(player['official_depth_rank'])} on the depth chart"
+                if player.get("official_role_known")
+                and pd.notna(player.get("official_depth_rank"))
+                else "no official depth-chart data"
+            )
+            why[1].markdown(
+                f"**Prior form** {prior}.  \n"
+                f"**Role** {role}; mock drafters rank him "
+                f"{int(player['market_room_rank'])} of "
+                f"{int(player['market_room_size'])} at his position on this team."
+            )
+            if player["guarded"]:
+                st.warning(
+                    f"The model had him at {int(player['uncapped_model_rank'])} "
+                    f"overall — more than {MODEL_PROMOTION_CAP_ROUNDS} rounds ahead "
+                    f"of the market — and the guard pulled him back to "
+                    f"{int(player['model_rank'])}.",
+                    icon="🛑",
                 )
-                disagreements["Player"] = disagreements["Player"].str.title()
-                st.dataframe(disagreements, hide_index=True, width="stretch")
+
+    st.download_button(
+        f"Download {target_year} board",
+        display_table(
+            board, {**DECISION_COLUMNS, **PROJECTION_COLUMNS, **EVIDENCE_COLUMNS, **EXTRA_COLUMNS}
+        ).to_csv(index=False),
+        file_name=f"{target_year}_draft_board.csv",
+        mime="text/csv",
+    )
+
+    if not unmatched_uploads.empty:
+        with st.expander(
+            f"⚠️ {len(unmatched_uploads)} uploaded {platform} rankings matched no "
+            "modeled player"
+        ):
+            st.dataframe(unmatched_uploads, hide_index=True, width="stretch")
+
+with draft_tab:
+    st.caption(
+        "Set where you are in the draft, mark what is gone, and the board becomes "
+        "a shortlist. Availability is an estimate from mock-draft variability, "
+        "not a guarantee."
+    )
+    pick_row = st.columns([1, 1, 2])
+    manual = pick_row[0].toggle("Enter pick numbers", value=False)
+    if manual:
+        current_pick = int(
+            pick_row[1].number_input("Current overall pick", min_value=1, value=1)
+        )
+        next_pick = int(
+            pick_row[2].number_input(
+                "Your next overall pick",
+                min_value=current_pick + 1,
+                value=max(current_pick + 1, 2 * league_size),
+            )
+        )
+    else:
+        current_round = int(
+            pick_row[1].number_input(
+                "Your round", min_value=1, max_value=draft_rounds, value=1
+            )
+        )
+        snake_picks = snake_pick_numbers(league_size, draft_slot, draft_rounds)
+        current_pick = snake_picks[current_round - 1]
+        next_pick = (
+            snake_picks[current_round]
+            if current_round < len(snake_picks)
+            else current_pick + league_size
+        )
+        pick_row[2].markdown(
+            f"### Pick {current_pick}  \nNext pick {next_pick}"
+        )
+
+    st.multiselect(
+        "Players already drafted",
+        options=forecast["player"].tolist(),
+        format_func=lambda player: str(player).title(),
+        key="drafted_players",
+    )
+    st.caption("Your roster so far")
+    roster_cols = st.columns(len(SUPPORTED_POSITIONS))
+    roster_counts = {
+        position: int(
+            column.number_input(
+                position, min_value=0, max_value=10, value=0, key=f"roster_{position}"
+            )
+        )
+        for position, column in zip(SUPPORTED_POSITIONS, roster_cols)
+    }
+
+    recommendations = build_draft_recommendations(
+        forecast,
+        current_pick,
+        next_pick,
+        roster_counts,
+        set(st.session_state.get("drafted_players", [])),
+        league_config,
+    )
+    if recommendations.empty:
+        st.info("Every modeled player has been marked drafted.")
+    else:
+        draft_columns = {
+            "recommendation": "Call",
+            "player": "Player",
+            "pos": "Pos",
+            "team": "Team",
+            "draft_adp": "ADP",
+            "platform_actionable_adp": "Take At",
+            "available_next_pick_probability": "Available Next Pick %",
+            "edge_probability": "Beat ADP %",
+            "remaining_starter_need": "Starters Needed",
+            "forecast_points": "Proj Points",
+        }
+        st.dataframe(
+            display_table(recommendations.head(25), draft_columns),
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "**Draft now** means fair value that probably will not survive to your "
+            "next pick. **Target — may wait** is a value the model expects to still "
+            "be there. This is an auditable heuristic, not a solved draft."
+        )
+
+with evidence_tab:
+    st.caption(
+        "Every season below was forecast by a model trained only on earlier "
+        f"seasons. {target_year} is the first untouched prospective test."
+    )
+    if not draft_simulation.empty:
+        overall = draft_simulation.iloc[-1]
+        headline = st.columns(4)
+        headline[0].metric(
+            "Policy lift vs ADP", f"{overall['edge_policy_lift']:+.0f} pts"
+        )
+        headline[1].metric(
+            "Seasons it won", f"{100 * overall['edge_policy_win_rate']:.0f}%"
+        )
+        headline[2].metric(
+            "Model board alone", f"{overall['pure_model_lift']:+.0f} pts"
+        )
+        if not value_backtest.empty:
+            headline[3].metric(
+                "Override win rate",
+                f"{100 * value_backtest.iloc[-1]['bargain_override_win_rate']:.0f}%",
+            )
+
+    st.markdown(
+        """
+**How to read a disagreement.** Size, position, and draft stage all matter:
+
+| Model moves him | Beat their ADP | Mean rank surplus |
+|---|---|---|
+| Within a round (base rate) | 42% | −8 |
+| 1 round | 49% | −4 |
+| 2 rounds | 63% | +14 |
+| 3 rounds | 69% | +28 |
+| 4+ rounds | 90% | +51 |
+
+Tight-end values after round 7 beat their ADP in 89–95% of cases. Quarterbacks
+promoted into the first three rounds are the model's worst category. Run
+`python scripts/evaluate_adp_comparison.py` for the full breakdown, including
+whether a call survives being re-priced on a different mock market.
+        """
+    )
+
+    with st.expander("Draft simulation by season"):
+        simulation_columns = {
+            "year": "Season",
+            "model_weight": "Model Weight",
+            "edge_policy_lift": "Policy Lift",
+            "edge_policy_win_rate": "Policy Win Rate",
+            "pure_model_lift": "Model-Only Lift",
+            "market_lineup_points": "ADP Lineup Points",
+            "simulations": "Drafts",
+        }
+        simulation_display = draft_simulation.rename(columns=simulation_columns)[
+            list(simulation_columns.values())
+        ]
+        simulation_display["Season"] = simulation_display["Season"].astype(str)
+        simulation_display["Policy Win Rate"] = (
+            100 * simulation_display["Policy Win Rate"]
+        ).round(0)
+        st.dataframe(
+            simulation_display.round(1), hide_index=True, width="stretch"
+        )
+        st.caption(
+            "Paired snake drafts: every policy gets the same slot and the same "
+            "sampled opponent behavior, then the best realized starting lineup is "
+            "scored. Each season's model weight was fitted only on earlier seasons."
+        )
+
+    with st.expander("Did the model's values beat ADP?"):
+        value_columns = {
+            "year": "Season",
+            "bargains": "Values Flagged",
+            "bargain_hit_rate": "Beat ADP %",
+            "non_bargain_hit_rate": "Everyone Else %",
+            "round_adjusted_hit_lift": "Same-Round Lift",
+            "bargain_override_win_rate": "Override Win Rate %",
+            "market_rank_mae": "ADP Rank Error",
+            "model_rank_mae": "Model Rank Error",
+            "top_board_market_drift": "Top-60 Drift",
+            "context_rank_mae_lift": "Context Would Add",
+        }
+        value_display = value_backtest.rename(columns=value_columns)[
+            list(value_columns.values())
+        ]
+        value_display["Season"] = value_display["Season"].astype(str)
+        for column in ["Beat ADP %", "Everyone Else %", "Override Win Rate %"]:
+            value_display[column] = (100 * value_display[column]).round(0)
+        st.dataframe(value_display.round(2), hide_index=True, width="stretch")
+        st.caption(
+            "A value is a player the model ranks at least one round ahead of "
+            "normalized market ADP. **Top-60 Drift** is how far the board moves the "
+            "early rounds off the market — the metric that would have caught this "
+            "model's one real failure. **Context Would Add** scores a model that "
+            "also uses team and role features; it stays near zero, which is why "
+            "those features are measured but not trained on."
+        )
+        st.dataframe(
+            value_segments.rename(
+                columns={
+                    "pos": "Pos",
+                    "market_tier": "Market Tier",
+                    "bargains": "Values",
+                    "hit_rate": "Beat ADP %",
+                    "override_win_rate": "Override Win Rate %",
+                    "average_actual_surplus": "Mean Rank Surplus",
+                }
+            ).round(2),
+            hide_index=True,
+            width="stretch",
+        )
         st.download_button(
-            f"Download {target_year} forecast",
-            forecast_display.to_csv(index=False),
-            file_name=f"fantasy_forecast_{target_year}.csv",
+            "Download historical player-level results",
+            value_players.to_csv(index=False),
+            file_name="historical_value_backtest.csv",
             mime="text/csv",
         )
 
-        with st.expander("ADP movement"):
-            if adp_movement.empty:
-                st.info(
-                    "One ADP snapshot is preserved. Refresh the ADP importer on "
-                    "another day to begin measuring risers, fallers, and future "
-                    "draft-day ADP."
-                )
-            else:
-                movement_display = adp_movement[
-                    [
-                        "player",
-                        "pos",
-                        "team",
-                        "first_adp",
-                        "latest_adp",
-                        "adp_movement",
-                        "snapshots",
-                    ]
-                ].rename(
-                    columns={
+    with st.expander("Point-forecast accuracy"):
+        point_columns = {
+            "year": "Season",
+            "players": "Players",
+            "mae": "Model Error",
+            "market_mae": "ADP Error",
+            "market_mae_lift": "Model Improvement",
+            "context_model_mae": "Context-Model Error",
+            "rank_correlation": "Rank Correlation",
+        }
+        st.dataframe(
+            backtest.rename(columns=point_columns)[list(point_columns.values())].round(2),
+            hide_index=True,
+            width="stretch",
+        )
+        st.caption(
+            "Point accuracy is not where this model earns its keep — it is close to "
+            "flat against ADP. The edge is in rank ordering and in which players it "
+            "flags, which the tables above measure."
+        )
+
+    with st.expander("Team and role context (not a model input)"):
+        outlook = build_team_position_outlook(forecast)
+        outlook_position = st.selectbox("Position", list(SUPPORTED_POSITIONS))
+        outlook_columns = {
+            "team": "Team",
+            "pos": "Pos",
+            "context_rank": "Context Rank",
+            "weighted_room_opportunities": "3-Yr Room Opportunities",
+            "last_year_room_points": "Last-Year Room Points",
+            "last_year_other_points": "Last-Year Teammate Points",
+            "model_favorite": "Model Favorite",
+            "favorite_model_rank": "Favorite Model Rank",
+            "candidates": "Candidates",
+        }
+        outlook_display = display_table(
+            outlook[outlook["pos"] == outlook_position].sort_values("context_rank"),
+            outlook_columns,
+        )
+        for column in ("Model Favorite", "Candidates"):
+            outlook_display[column] = outlook_display[column].astype(str).str.title()
+        st.dataframe(outlook_display.round(1), hide_index=True, width="stretch")
+        st.caption(
+            "The destination team's recent production at each position, with the "
+            "candidate's own past output removed from the teammate signal. Shown "
+            "for your judgement: a context-augmented model is scored every backtest "
+            "window and does not rank better, so the forecast does not train on it."
+        )
+
+    with st.expander("ADP movement and data quality"):
+        movement = build_adp_movement(target_year)
+        snapshots = len(available_adp_snapshots(target_year))
+        if movement.empty:
+            st.info(
+                f"{snapshots} ADP snapshot preserved. Re-run the ADP importer on "
+                "another day to start measuring risers and fallers."
+            )
+        else:
+            st.dataframe(
+                display_table(
+                    movement,
+                    {
                         "player": "Player",
-                        "pos": "Position",
+                        "pos": "Pos",
                         "team": "Team",
                         "first_adp": "First ADP",
                         "latest_adp": "Latest ADP",
                         "adp_movement": "Picks Risen",
                         "snapshots": "Snapshots",
-                    }
-                )
-                movement_display["Player"] = movement_display["Player"].str.title()
-                st.dataframe(movement_display, hide_index=True, width="stretch")
-
-        st.subheader("Live draft decision board")
+                    },
+                ),
+                hide_index=True,
+                width="stretch",
+            )
+        quality = data_quality_report(year_options)
+        quality["adp_match_rate"] = quality["adp_match_rate"].map(
+            lambda value: f"{value:.1%}"
+        )
+        st.dataframe(quality, hide_index=True, width="stretch")
         st.caption(
-            "Choose your current round or manually enter traded/keeper pick numbers, "
-            "then mark drafted players. Availability uses selected-platform ADP when "
-            "uploaded and is an estimate, not a guarantee."
-        )
-        manual_picks = st.toggle("Manually enter pick numbers", value=False)
-        if manual_picks:
-            pick_col, next_col = st.columns(2)
-            current_pick = int(
-                pick_col.number_input("Current overall pick", min_value=1, value=1)
-            )
-            next_pick = int(
-                next_col.number_input(
-                    "Your next overall pick",
-                    min_value=current_pick + 1,
-                    value=max(current_pick + 1, 2 * league_size),
-                )
-            )
-        else:
-            current_round = int(
-                st.number_input(
-                    "Your current round",
-                    min_value=1,
-                    max_value=int(draft_rounds),
-                    value=1,
-                )
-            )
-            snake_picks = snake_pick_numbers(
-                int(league_size), int(draft_slot), int(draft_rounds)
-            )
-            current_pick = snake_picks[current_round - 1]
-            next_pick = (
-                snake_picks[current_round]
-                if current_round < len(snake_picks)
-                else current_pick + int(league_size)
-            )
-            pick_col, next_col = st.columns(2)
-            pick_col.metric("Your current overall pick", current_pick)
-            next_col.metric("Your next overall pick", next_pick)
-        drafted_players = st.multiselect(
-            "Players already drafted",
-            options=forecast["player"].tolist(),
-            format_func=lambda player: str(player).title(),
-        )
-        st.caption("Your current roster counts")
-        roster_cols = st.columns(4)
-        roster_counts = {
-            position: int(
-                column.number_input(
-                    position,
-                    min_value=0,
-                    max_value=10,
-                    value=0,
-                    key=f"roster_{position}",
-                )
-            )
-            for position, column in zip(SUPPORTED_POSITIONS, roster_cols)
-        }
-        draft_board = build_draft_recommendations(
-            forecast,
-            current_pick,
-            next_pick,
-            roster_counts,
-            set(drafted_players),
-            league_config,
-        )
-        draft_display = draft_board.head(25)[
-            [
-                "recommendation",
-                "player",
-                "pos",
-                "team",
-                "market_room_rank",
-                "market_room_size",
-                "market_room_adp_gap",
-                "official_depth_rank",
-                "official_starter",
-                "official_roster_status",
-                "role_agreement",
-                "fair_adp",
-                "platform_actionable_adp",
-                "draft_adp",
-                "platform_value_gap",
-                "platform_source",
-                "edge_probability",
-                "available_next_pick_probability",
-                "forecast_points",
-                "remaining_starter_need",
-            ]
-        ].rename(
-            columns={
-                "recommendation": "Recommendation",
-                "player": "Player",
-                "pos": "Position",
-                "team": "Team",
-                "market_room_rank": "Room ADP Rank",
-                "market_room_size": "ADP Room Candidates",
-                "market_room_adp_gap": "Picks Behind Room Leader",
-                "official_depth_rank": "Official Depth Rank",
-                "official_starter": "Official Starter",
-                "official_roster_status": "Roster Status",
-                "role_agreement": "Market / Depth Agreement",
-                "fair_adp": "Fair ADP",
-                "platform_actionable_adp": "Actionable ADP",
-                "draft_adp": f"{platform} ADP",
-                "platform_value_gap": "Platform Value Gap",
-                "platform_source": "ADP Source",
-                "edge_probability": "Probability Beat ADP %",
-                "available_next_pick_probability": "Available Next Pick %",
-                "forecast_points": "Forecast Points",
-                "remaining_starter_need": "Remaining Starter Need",
-            }
-        )
-        draft_display["Player"] = draft_display["Player"].str.title()
-        for column in ["Probability Beat ADP %", "Available Next Pick %"]:
-            draft_display[column] = (100 * draft_display[column]).round(0)
-        st.dataframe(draft_display, hide_index=True, width="stretch")
-
-        st.subheader("Team-position outlook")
-        st.caption(
-            "This view measures the destination team's recent production at each "
-            "position. For each candidate, his own past production is removed from "
-            "the teammate-environment signal—even when he stayed on the same team. "
-            "These figures are context for your own judgement; the forecast does "
-            "not train on them, because a context-augmented model was scored in "
-            "every backtest window and did not rank better. The player and "
-            "draft-board tables separately show how mock drafters rank each player "
-            "against current same-team, same-position candidates."
-        )
-        outlook = build_team_position_outlook(forecast)
-        outlook_position = st.selectbox(
-            "Outlook position", ["ALL", *SUPPORTED_POSITIONS]
-        )
-        if outlook_position != "ALL":
-            outlook = outlook[outlook["pos"] == outlook_position]
-        outlook_display = outlook[
-            [
-                "team",
-                "pos",
-                "context_rank",
-                "weighted_room_opportunities",
-                "last_year_room_points",
-                "last_year_room_opportunities",
-                "last_year_other_points",
-                "last_year_other_opportunities",
-                "last_year_top_two",
-                "last_year_rank_percentile",
-                "model_favorite",
-                "favorite_model_rank",
-                "favorite_forecast_points",
-                "favorite_role_share",
-                "candidates",
-            ]
-        ].rename(
-            columns={
-                "team": "Team",
-                "pos": "Position",
-                "context_rank": "Context Rank",
-                "weighted_room_opportunities": "3-Year Weighted Room Opportunities",
-                "last_year_room_points": "Last-Year Room Points",
-                "last_year_room_opportunities": "Last-Year Room Opportunities",
-                "last_year_other_points": "Last-Year Teammate Points",
-                "last_year_other_opportunities": "Last-Year Teammate Opportunities",
-                "last_year_top_two": "Last-Year Top-Two Points",
-                "last_year_rank_percentile": "Last-Year Position Percentile",
-                "model_favorite": "Model Favorite",
-                "favorite_model_rank": "Favorite Model Rank",
-                "favorite_forecast_points": "Favorite Forecast Points",
-                "favorite_role_share": "Favorite Prior Opportunity Share",
-                "candidates": "Current Candidates",
-            }
-        )
-        outlook_display["Model Favorite"] = outlook_display["Model Favorite"].str.title()
-        outlook_display["Current Candidates"] = outlook_display[
-            "Current Candidates"
-        ].str.title()
-        outlook_display["Last-Year Position Percentile"] = (
-            100 * outlook_display["Last-Year Position Percentile"]
-        ).round(0)
-        outlook_display["Favorite Prior Opportunity Share"] = (
-            100 * outlook_display["Favorite Prior Opportunity Share"]
-        ).round(0)
-        for column in [
-            "3-Year Weighted Room Opportunities",
-            "Last-Year Room Points",
-            "Last-Year Room Opportunities",
-            "Last-Year Teammate Points",
-            "Last-Year Teammate Opportunities",
-            "Last-Year Top-Two Points",
-            "Favorite Forecast Points",
-        ]:
-            outlook_display[column] = outlook_display[column].round(1)
-        st.dataframe(outlook_display, hide_index=True, width="stretch")
-
-        st.subheader("Chronological backtest")
-        if backtest.empty:
-            st.warning("Not enough earlier seasons are available for a backtest.")
-        else:
-            backtest_display = backtest.rename(
-                columns={
-                    "year": "Season",
-                    "players": "Players",
-                    "mae": "Point MAE",
-                    "market_mae": "Market Point MAE",
-                    "market_mae_lift": "Point MAE Improvement vs Market",
-                    "context_model_mae": "Context-Model MAE",
-                    "context_mae_lift": "Context MAE Improvement",
-                    "rank_correlation": "Rank Correlation",
-                }
-            )
-            for column in [
-                "Point MAE",
-                "Market Point MAE",
-                "Point MAE Improvement vs Market",
-                "Context-Model MAE",
-                "Context MAE Improvement",
-            ]:
-                backtest_display[column] = backtest_display[column].round(1)
-            backtest_display["Rank Correlation"] = backtest_display[
-                "Rank Correlation"
-            ].round(3)
-            st.dataframe(backtest_display, hide_index=True, width="stretch")
-
-        st.subheader("Did model bargains actually beat ADP?")
-        st.caption(
-            "For each season, the model was trained only on earlier seasons. A "
-            "bargain means its league-adjusted model rank was at least one round "
-            "ahead of market rank; a hit means its realized league-adjusted rank "
-            "finished ahead of that market rank. These seasons are the model's "
-            "development evidence; 2026 is the first untouched prospective test."
-        )
-        if value_backtest.empty:
-            st.warning("Not enough earlier seasons are available for a value backtest.")
-        else:
-            overall = value_backtest[value_backtest["year"] == "Overall"].iloc[0]
-            value_metric_1, value_metric_2, value_metric_3, value_metric_4 = st.columns(4)
-            value_metric_1.metric("Historical bargains", int(overall["bargains"]))
-            value_metric_2.metric(
-                "Bargain hit rate", f'{100 * overall["bargain_hit_rate"]:.1f}%'
-            )
-            value_metric_3.metric(
-                "ADP-round-adjusted lift",
-                f'{100 * overall["round_adjusted_hit_lift"]:+.1f} pts',
-            )
-            value_metric_4.metric(
-                "Model override win rate",
-                f'{100 * overall["bargain_override_win_rate"]:.1f}%'
-            )
-            value_display = value_backtest.rename(
-                columns={
-                    "year": "Season",
-                    "players": "Players",
-                    "bargains": "Bargains",
-                    "bargain_hit_rate": "Bargain Hit Rate",
-                    "non_bargain_hit_rate": "Other-Player Hit Rate",
-                    "bargain_hit_lift": "Hit-Rate Lift",
-                    "round_adjusted_expected_hit_rate": "Same-Round Baseline Hit Rate",
-                    "round_adjusted_hit_lift": "Same-Round Hit-Rate Lift",
-                    "bargain_override_win_rate": "Model Override Win Rate",
-                    "bargain_avg_actual_surplus": "Bargain Avg Actual Rank Surplus",
-                    "non_bargain_avg_actual_surplus": "Other Avg Actual Rank Surplus",
-                    "fades": "Fades",
-                    "fade_hit_rate": "Fade Hit Rate",
-                    "market_rank_mae": "Market Rank MAE",
-                    "model_rank_mae": "Model Rank MAE",
-                    "rank_mae_improvement": "Rank MAE Improvement",
-                    "context_model_rank_mae": "Context-Model Rank MAE",
-                    "context_rank_mae_lift": "Context Rank MAE Improvement",
-                    "top_board_market_drift": "Top-60 Drift From Market",
-                    "market_correlation": "Market Correlation",
-                    "signal_correlation": "Signal Correlation",
-                }
-            )
-            value_display["Season"] = value_display["Season"].astype(str)
-            for column in [
-                "Bargain Hit Rate",
-                "Other-Player Hit Rate",
-                "Hit-Rate Lift",
-                "Same-Round Baseline Hit Rate",
-                "Same-Round Hit-Rate Lift",
-                "Model Override Win Rate",
-                "Fade Hit Rate",
-            ]:
-                value_display[column] = (100 * value_display[column]).round(1)
-            for column in [
-                "Bargain Avg Actual Rank Surplus",
-                "Other Avg Actual Rank Surplus",
-                "Market Rank MAE",
-                "Model Rank MAE",
-                "Rank MAE Improvement",
-                "Context-Model Rank MAE",
-                "Context Rank MAE Improvement",
-                "Top-60 Drift From Market",
-                "Market Correlation",
-                "Signal Correlation",
-            ]:
-                value_display[column] = value_display[column].round(2)
-            st.dataframe(value_display, hide_index=True, width="stretch")
-            st.caption(
-                "Segment results reveal whether pooled performance is concentrated "
-                "in a particular position or part of the draft."
-            )
-            segment_display = value_segments.rename(
-                columns={
-                    "pos": "Position",
-                    "market_tier": "Market Tier",
-                    "bargains": "Bargains",
-                    "hit_rate": "Hit Rate %",
-                    "override_win_rate": "Override Win Rate %",
-                    "average_actual_surplus": "Average Actual Rank Surplus",
-                }
-            )
-            for column in ["Hit Rate %", "Override Win Rate %"]:
-                segment_display[column] = (100 * segment_display[column]).round(1)
-            segment_display["Market Tier"] = segment_display["Market Tier"].astype(str)
-            segment_display["Average Actual Rank Surplus"] = segment_display[
-                "Average Actual Rank Surplus"
-            ].round(1)
-            st.dataframe(segment_display, hide_index=True, width="stretch")
-
-            st.subheader("Historical full-draft simulation")
-            st.caption(
-                "Paired snake-draft simulations use the same draft slot and sampled "
-                "opponent behavior for each policy, then score the best realized "
-                "starting lineup. The actionable policy keeps most of ADP and applies "
-                "a model tilt whose weight was fitted on earlier seasons only, so no "
-                "season is scored with a weight chosen on its own results. Pure model "
-                "ranking is shown because it performed poorly and should not be used "
-                "as a complete draft board."
-            )
-            simulation_overall = draft_simulation[
-                draft_simulation["year"] == "Overall"
-            ].iloc[0]
-            simulation_metric_1, simulation_metric_2, simulation_metric_3 = st.columns(3)
-            simulation_metric_1.metric(
-                "Actionable-policy lineup lift",
-                f'{simulation_overall["edge_policy_lift"]:+.1f} points',
-            )
-            simulation_metric_2.metric(
-                "Actionable-policy win rate",
-                f'{100 * simulation_overall["edge_policy_win_rate"]:.1f}%',
-            )
-            simulation_metric_3.metric(
-                "Pure-model lineup lift",
-                f'{simulation_overall["pure_model_lift"]:+.1f} points',
-            )
-            simulation_display = draft_simulation.rename(
-                columns={
-                    "year": "Season",
-                    "simulations": "Simulations",
-                    "rounds": "Rounds",
-                    "model_weight": "Model Weight",
-                    "edge_policy_lineup_points": "Actionable Lineup Points",
-                    "pure_model_lineup_points": "Pure Model Lineup Points",
-                    "market_lineup_points": "ADP Lineup Points",
-                    "edge_policy_lift": "Actionable Lift",
-                    "pure_model_lift": "Pure Model Lift",
-                    "edge_policy_win_rate": "Actionable Win Rate %",
-                    "pure_model_win_rate": "Pure Model Win Rate %",
-                    "tie_rate": "Tie Rate %",
-                }
-            )
-            simulation_display["Season"] = simulation_display["Season"].astype(str)
-            for column in [
-                "Actionable Win Rate %",
-                "Pure Model Win Rate %",
-                "Tie Rate %",
-            ]:
-                simulation_display[column] = (100 * simulation_display[column]).round(1)
-            for column in [
-                "Actionable Lineup Points",
-                "Pure Model Lineup Points",
-                "ADP Lineup Points",
-                "Actionable Lift",
-                "Pure Model Lift",
-            ]:
-                simulation_display[column] = simulation_display[column].round(1)
-            st.dataframe(simulation_display, hide_index=True, width="stretch")
-            st.download_button(
-                "Download historical value-backtest players",
-                value_backtest_players.to_csv(index=False),
-                file_name="historical_model_value_backtest.csv",
-                mime="text/csv",
-            )
-
-with summary_tab:
-    filter_col, position_col, history_col, active_col = st.columns([3, 1, 1, 1])
-    search = filter_col.text_input("Search players", placeholder="Player name")
-    position = position_col.selectbox("Position", ["ALL", *SUPPORTED_POSITIONS])
-    min_seasons = history_col.number_input(
-        "Minimum seasons", min_value=1, max_value=len(years), value=1
-    )
-    latest_only = active_col.checkbox("Latest season only", value=True)
-
-    filtered = summary.copy()
-    if search:
-        filtered = filtered[filtered["player"].str.contains(search, case=False, na=False)]
-    if position != "ALL":
-        filtered = filtered[filtered["pos"] == position]
-    filtered = filtered[filtered["seasons_played"] >= min_seasons]
-    if latest_only:
-        filtered = filtered[filtered["latest_year"] == max(years)]
-
-    metric_1, metric_2, metric_3 = st.columns(3)
-    metric_1.metric("Players shown", len(filtered))
-    metric_2.metric("Complete seasons", len(years))
-    metric_3.metric("Latest season", max(years))
-
-    chart_data = filtered[["player", "pos", "adp_avg", "score"]].rename(
-        columns={"adp_avg": "ADP", "score": "Historical score"}
-    )
-    if not chart_data.empty:
-        st.scatter_chart(
-            chart_data,
-            x="ADP",
-            y="Historical score",
-            color="pos",
-            size=40,
-            height=350,
+            "Only matched player-position records can be scored. Sources, scoring, "
+            "and import commands are documented in `data/SOURCES.md`."
         )
 
-    summary_display = filtered[
-        [
-            "player",
-            "pos",
-            "team_adp",
-            "latest_year",
-            "adp_avg",
-            "projection",
-            "value_over_cost",
-            "vorp",
-            "risk_penalty",
-            "seasons_played",
-            "confidence",
-            "score",
-        ]
-    ].rename(
-        columns={
-            "player": "Player",
-            "pos": "Position",
-            "team_adp": "Team",
-            "latest_year": "Latest Season",
-            "adp_avg": "Latest ADP",
-            "projection": "Weighted Points",
-            "value_over_cost": "Value Over Cost",
-            "vorp": "VORP",
-            "risk_penalty": "Risk Penalty",
-            "seasons_played": "Seasons",
-            "confidence": "History Confidence",
-            "score": "Historical Score",
-        }
-    )
-    summary_display["Player"] = summary_display["Player"].str.title()
-    summary_display["Team"] = summary_display["Team"].fillna("—")
-    st.dataframe(summary_display, hide_index=True, width="stretch")
-    st.download_button(
-        "Download filtered summary",
-        summary_display.to_csv(index=False),
-        file_name="fantasy_draft_value_summary.csv",
-        mime="text/csv",
-    )
-
-with season_tab:
-    selected_year = st.selectbox("Season", sorted(years, reverse=True))
-    season_position = st.selectbox(
-        "Season position", ["ALL", *SUPPORTED_POSITIONS], key="season_position"
-    )
-    season_search = st.text_input(
-        "Season player search", placeholder="Player name", key="season_search"
-    )
-    season_rows = player_seasons[player_seasons["year"] == selected_year].copy()
-    if season_position != "ALL":
-        season_rows = season_rows[season_rows["pos"] == season_position]
-    if season_search:
-        season_rows = season_rows[
-            season_rows["player"].str.contains(season_search, case=False, na=False)
-        ]
-
-    if not season_rows.empty:
-        st.scatter_chart(
-            season_rows,
-            x="adp_avg",
-            y="value_over_cost",
-            color="pos",
-            size=40,
-            height=350,
-        )
-    season_display = season_rows[
-        [
-            "player",
-            "pos",
-            "team_adp",
-            "adp_avg",
-            "round",
-            "projection",
-            "expected_points_at_cost",
-            "value_over_cost",
-            "vorp",
-            "risk",
-            "season_score",
-        ]
-    ].rename(
-        columns={
-            "player": "Player",
-            "pos": "Position",
-            "team_adp": "Team",
-            "adp_avg": "ADP",
-            "round": "Round",
-            "projection": "Fantasy Points",
-            "expected_points_at_cost": "Expected at Cost",
-            "value_over_cost": "Value Over Cost",
-            "vorp": "VORP",
-            "risk": "Multi-Year PPG Risk",
-            "season_score": "Season Score",
-        }
-    )
-    season_display["Player"] = season_display["Player"].str.title()
-    st.dataframe(season_display, hide_index=True, width="stretch")
-    st.download_button(
-        "Download season rows",
-        season_display.to_csv(index=False),
-        file_name=f"fantasy_draft_value_{selected_year}.csv",
-        mime="text/csv",
-    )
-
-with quality_tab:
-    st.subheader("ADP-to-results matching")
-    quality_display = quality.copy()
-    quality_display["adp_match_rate"] = quality_display["adp_match_rate"].map(
-        lambda value: f"{value:.1%}"
-    )
-    st.dataframe(quality_display, hide_index=True, width="stretch")
-    st.caption(
-        "Only matched player-position records can be scored. The examples above make "
-        "name differences, defenses, retirements, and players without results visible."
-    )
-    st.subheader("Method")
     st.markdown(
-        """
-        - **Value over cost** compares realized points with the result expected at the
-          same season and positional ADP slot.
-        - **VORP** uses replacement ranks derived from the league roster settings.
-        - **Risk** measures multi-season points-per-game variation. One-season players
-          are marked low-confidence instead of being described as risk-free.
-        - Each older season receives half the weight of the following season.
-
-        The forecast uses ADP—including each player's hierarchy among same-team,
-        same-position candidates—as a market baseline. Heavily regularized,
-        position-specific models estimate its error from prior player ability, role,
-        availability, and destination-team evidence. Mock ADP comes from Fantasy
-        Football Calculator's human half-PPR drafts; results come from nflverse game
-        data. Beat-ADP probabilities are calibrated only from chronological historical
-        predictions.
-
-        Data provenance and import commands are documented in `data/SOURCES.md`.
+        f"""
+**Method in one paragraph.** ADP is the baseline, not the enemy: position-specific
+ridge models estimate the points implied by a player's mock-draft price, then a
+deliberately narrow model — eleven features of the player's own recent form —
+predicts where that price is wrong. Its penalty is fitted per position by holding
+out whole seasons inside the training window. League replacement levels turn the
+adjusted forecast into VORP and a fair rank, no player may be ranked more than
+{MODEL_PROMOTION_CAP_ROUNDS} rounds ahead of the market, and the board you draft
+from blends market rank with model rank at a weight fitted on simulated draft
+outcomes ({blend_weight:.0%} model today). Beat-ADP probabilities are calibrated
+only from chronological out-of-sample predictions.
         """
     )
