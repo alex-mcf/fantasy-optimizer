@@ -1187,7 +1187,11 @@ def forecast_season(
 
 
 def build_team_position_outlook(forecast: pd.DataFrame) -> pd.DataFrame:
-    """Summarize the model's destination role signal for each current team/position."""
+    """Summarize each team/position's recent production for the current candidates.
+
+    This is descriptive context for a human, not a model output: these features
+    are measured in every backtest and are deliberately not trained on.
+    """
     rows: list[dict[str, object]] = []
     for (team, position), group in forecast.groupby(["team", "pos"], dropna=False):
         ordered = group.sort_values("model_rank")

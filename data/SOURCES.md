@@ -15,6 +15,11 @@ The import uses one definition for every year:
 - average draft position from human mock drafts (computer picks are filtered by
   the provider).
 
+Pool depth varies by season at the source: 2022 returns 117 modeled players
+against 144–191 in the other seasons. This is upstream, not a matching failure —
+2022 joins to completed results at 100%, the best rate of any season — but it
+does mean 2022 backtests cover about two rounds less of the board.
+
 The forecast also derives a point-in-time role-competition proxy from each
 season's ADP pool: a player's ADP rank and pick distance behind the ADP leader
 among same-team, same-position candidates. This is reconstructible for every

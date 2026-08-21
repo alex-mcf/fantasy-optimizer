@@ -59,13 +59,15 @@ chflags -R nohidden .venv
 The model is deliberately small and auditable. For every target season it
 builds player features from only the preceding three completed NFL seasons:
 recent points per game, games played, total points, trend, available history,
-age, experience, rookie/sophomore status, NFL draft capital, and position. It
-also builds destination team-position features from actual
-weekly production. The signals are deliberately separated into player ability
-(points, points per game, and points per opportunity), role (share of the
-position's opportunities), and environment (team-position volume plus teammate
-points and opportunities with the candidate removed). The subtraction applies
-whether the player stayed or changed teams.
+age, experience, rookie/sophomore status, NFL draft capital, and position.
+
+It also builds destination team-position features from actual weekly
+production, separated into role (share of the position's opportunities) and
+environment (team-position volume plus teammate points and opportunities with
+the candidate removed, whether the player stayed or changed teams). These are
+**not** model inputs. They are displayed for judgement, they drive the
+team-position outlook, and a context-augmented model is scored in every backtest
+window so the decision to leave them out stays measured — see below.
 
 ADP is treated as a strong market baseline instead of discarded. Separate
 position-specific ridge models estimate the production implied by ADP. That
@@ -179,8 +181,11 @@ not mistaken for a stronger claim:
   costs roughly 14 lineup points a season and raises top-of-board drift — the
   selection criterion is whole-pool error, which cannot see that damage, so the
   floor is where that judgement lives.
-- **The 2022 season is thin.** Only 117 ADP rows match results that year, against
-  141–185 in every other season, so results driven by 2022 deserve less weight.
+- **The 2022 season is thin.** Its ADP file contains only 117 modeled players,
+  against 144–191 in every other season. This is the upstream source, not a
+  matching failure: 2022 joins to results at 100%, the best rate of any season.
+  Results driven by 2022 still deserve less weight, since the pool is two rounds
+  shallower than the seasons around it.
 
 The app also includes a team-position outlook. This ranks recent QB, RB, WR, and
 TE environments independently of the current player name, then shows which

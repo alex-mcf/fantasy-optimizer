@@ -87,6 +87,28 @@ class ForecasterTests(unittest.TestCase):
         self.assertLessEqual(int(board.loc[39, "capped"]), 40)
         self.assertEqual(sorted(capped.tolist()), list(range(1, size + 1)))
 
+    def test_the_promotion_guard_holds_on_arbitrary_boards(self):
+        rng = np.random.default_rng(0)
+        for _ in range(50):
+            config = LeagueConfig(
+                league_size=int(rng.integers(4, 21)), qb=1, rb=2, wr=2, te=1, flex=1
+            )
+            limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
+            size = int(rng.integers(1, 220))
+            index = rng.permutation(size)
+            model = pd.Series(rng.permutation(size) + 1, index=index)
+            market = pd.Series(rng.permutation(size) + 1, index=index)
+            capped = _cap_promotions(model, market, config)
+            self.assertEqual(sorted(capped.tolist()), list(range(1, size + 1)))
+            if size > limit:
+                self.assertLessEqual(int((market - capped).max()), limit)
+            # Players the market already prices inside the limit keep their order.
+            unheld = market <= limit + 1
+            self.assertEqual(
+                list(np.argsort(capped[unheld].to_numpy())),
+                list(np.argsort(model[unheld].to_numpy())),
+            )
+
     def test_market_sample_features_are_comparable_across_seasons(self):
         frame = pd.DataFrame(
             [

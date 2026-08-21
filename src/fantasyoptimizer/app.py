@@ -44,8 +44,10 @@ st.caption(
     "Half-PPR market-error forecasting and live draft decision support"
 )
 st.info(
-    "ADP is the market baseline. Position-specific models use prior player, role, "
-    "and team evidence to predict where that baseline is wrong.",
+    "ADP is the market baseline. Position-specific models use each player's own "
+    "recent production, availability, and age to predict where that baseline is "
+    "wrong. Team and role context is shown for judgement but is not a model input: "
+    "it was measured and did not improve the forecast.",
     icon="ℹ️",
 )
 
@@ -219,10 +221,10 @@ if forecast_years:
         st.caption(
             "Positive platform value gap means the model's fair ADP is earlier "
             "than the selected platform market. The model starts from consistent "
-            "FFC ADP, then adjusts it "
-            "with player ability, role, destination context, and availability. "
-            "Room fields are derived from the ADP pool; they are not an official "
-            "NFL depth chart."
+            "FFC ADP, then adjusts it with each player's own recent production, "
+            "availability, and age. Room and context fields are shown for "
+            "judgement, not used as model inputs; they are derived from the ADP "
+            "pool and are not an official NFL depth chart."
         )
         st.caption(
             f"Selected-platform coverage: {platform_matches}/{len(forecast)}. "
@@ -629,8 +631,11 @@ if forecast_years:
             "This view measures the destination team's recent production at each "
             "position. For each candidate, his own past production is removed from "
             "the teammate-environment signal—even when he stayed on the same team. "
-            "The player and draft-board tables separately show how mock drafters "
-            "rank each player against current same-team, same-position candidates."
+            "These figures are context for your own judgement; the forecast does "
+            "not train on them, because a context-augmented model was scored in "
+            "every backtest window and did not rank better. The player and "
+            "draft-board tables separately show how mock drafters rank each player "
+            "against current same-team, same-position candidates."
         )
         outlook = build_team_position_outlook(forecast)
         outlook_position = st.selectbox(
