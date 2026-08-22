@@ -26,10 +26,10 @@ from fantasyoptimizer.config.league_config import (  # noqa: E402
     LeagueConfig,
 )
 from fantasyoptimizer.forecasting.forecaster import (  # noqa: E402
-    MODEL_PROMOTION_CAP_ROUNDS,
     backtest_draft_value,
     build_training_examples,
     forecast_season,
+    promotion_allowance,
 )
 from fantasyoptimizer.optimizer import policy_blend_weights  # noqa: E402
 from fantasyoptimizer.utils.data_loader import (  # noqa: E402
@@ -167,7 +167,7 @@ def live_disagreements(
     ).round(1)
     forecast["guard held it back"] = (
         forecast["market_rank"] - forecast["uncapped_model_rank"]
-        > MODEL_PROMOTION_CAP_ROUNDS * config.league_size
+        > promotion_allowance(forecast["market_rank"], config)
     )
     columns = [
         "player",

@@ -2,12 +2,12 @@ import unittest
 
 from fantasyoptimizer.config.league_config import DEFAULT_LEAGUE_CONFIG
 from fantasyoptimizer.forecasting.forecaster import (
-    MODEL_PROMOTION_CAP_ROUNDS,
     backtest_draft_value,
     backtest_forecaster,
     build_training_examples,
     calibrate_edge_probabilities,
     forecast_season,
+    promotion_allowance,
 )
 from fantasyoptimizer.scoring.scoring_engine import (
     compute_player_season_scores,
@@ -64,10 +64,12 @@ class HistoricalPipelineTests(unittest.TestCase):
             .any()
         )
         self.assertTrue(forecast["model_rank"].is_monotonic_increasing)
-        # No player may be ranked more than three rounds ahead of the market.
-        self.assertLessEqual(
-            int((forecast["market_rank"] - forecast["model_rank"]).max()),
-            MODEL_PROMOTION_CAP_ROUNDS * DEFAULT_LEAGUE_CONFIG.league_size,
+        # Nobody is promoted past the allowance their own market rank earns.
+        allowed = promotion_allowance(
+            forecast["market_rank"], DEFAULT_LEAGUE_CONFIG
+        )
+        self.assertTrue(
+            ((forecast["market_rank"] - forecast["model_rank"]) <= allowed).all()
         )
         self.assertIn("uncapped_model_rank", forecast)
         self.assertIn("official_depth_rank", forecast)

@@ -117,15 +117,25 @@ CONTEXT_RESIDUAL_FEATURE_COLUMNS = RESIDUAL_FEATURE_COLUMNS + CONTEXT_FEATURE_CO
 # it without re-running the draft simulations.
 RESIDUAL_ALPHA_GRID = (300.0, 1000.0, 3000.0, 10000.0, 30000.0, 1e9)
 
-# A model rank may not sit more than this many rounds ahead of a player's market
-# rank. The residual layer is linear, so it cannot say "efficient, but on almost
-# no volume", and nothing else bounds how far a prediction may travel from the
+# How far a player may be promoted above his market rank, as a share of that rank.
+# The residual layer is linear, so it cannot say "efficient, but on almost no
+# volume", and nothing else bounds how far a prediction may travel from the
 # market: in 2024 it put a TE with the position's best points-per-opportunity on
 # 40 opportunities at rank 1 against a market rank of 158. Shrinking the rate
 # features toward their position prior does not help — the model standardizes its
 # features, so a monotone rescale is undone — but refusing the extreme promotion
 # does.
-MODEL_PROMOTION_CAP_ROUNDS = 3
+#
+# The allowance scales with market rank because the cost of being wrong does. A
+# flat cap was the first fix and it was both too tight where the model is best —
+# late-round tight ends, which beat their ADP in 89-95% of cases — and too loose
+# where it is worst, since a promotion from round 4 to round 2 fits inside any
+# flat limit. Scaling turns one rule into the shape the evidence asks for, and it
+# is worth about 14 lineup points a season over the flat version. Anything from
+# 0.2 to 0.4 performs similarly; the floor keeps a round of movement available at
+# the very top of the board.
+MODEL_PROMOTION_CAP_SHARE = 0.35
+MODEL_PROMOTION_FLOOR_ROUNDS = 1
 
 # How far into the board the drift metric looks. Whole-pool error averages over
 # ~150 players and cannot see a model going noisy where drafts are decided, so
@@ -1056,25 +1066,47 @@ def _add_value_ranks(
     return forecast
 
 
+def promotion_allowance(
+    market_rank: pd.Series, config: LeagueConfig = DEFAULT_LEAGUE_CONFIG
+) -> pd.Series:
+    """How many picks above his market rank a player is allowed to be ranked.
+
+    Whole picks: a fractional allowance is not a thing a draft can express, and
+    rounding here keeps the bound exact for callers that assert on it.
+    """
+    return pd.Series(
+        np.floor(
+            np.maximum(
+                MODEL_PROMOTION_FLOOR_ROUNDS * config.league_size,
+                MODEL_PROMOTION_CAP_SHARE * market_rank.to_numpy(dtype=float),
+            )
+        ).astype(int),
+        index=market_rank.index,
+    )
+
+
 def _cap_promotions(
     model_rank: pd.Series, market_rank: pd.Series, config: LeagueConfig
 ) -> pd.Series:
     """Re-rank a board so nobody sits more than a few rounds ahead of the market.
 
     This bounds the model's disagreement rather than damping it: a player the
-    model likes still moves up, just not from the last round to the first. It
-    binds almost entirely on tight ends, where replacement-level value and market
-    price disagree most, and leaves the rest of the board untouched.
+    model likes still moves up, just not from the last round to the first. How far
+    he may move scales with where the market has him, so a late-round flier can
+    travel a long way while an early-round pick cannot — which is the shape the
+    backtests ask for, since the model's late calls are its best and its early
+    promotions are its worst.
 
     Each player gets an earliest allowed slot, and the board is filled slot by
     slot from whoever is both eligible and best liked. Simply clamping the sort
     key is not enough: re-ranking closes the gaps the clamp opened, which lets a
     capped player drift back above the bound.
     """
-    limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
     size = len(model_rank)
     ranks = model_rank.to_numpy(dtype=float)
-    floors = np.clip(market_rank.to_numpy(dtype=float) - limit, 1, max(size, 1))
+    market = market_rank.to_numpy(dtype=float)
+    allowance = promotion_allowance(market_rank, config).to_numpy(dtype=float)
+    floors = np.clip(market - allowance, 1, max(size, 1))
     by_floor = sorted(range(size), key=lambda index: (floors[index], ranks[index]))
     eligible: list[tuple[float, int]] = []
     placed = np.zeros(size, dtype=int)
@@ -1503,11 +1535,27 @@ def backtest_draft_value(
     return pd.DataFrame(summary_rows), player_results
 
 
-def _edge_bucket(values: pd.Series) -> pd.Series:
+def _edge_bucket(values: pd.Series, league_size: int) -> pd.Series:
+    """Bucket a model-versus-market gap by rounds, not by picks.
+
+    The gradient inside a "2+ round" bucket is the whole story — two-round calls
+    beat their ADP 63% of the time and four-round calls 90% — so the top of the
+    range is split rather than pooled. Bounds are in rounds because a 24-pick gap
+    means something different in a 10-team league than a 14-team one.
+    """
+    round_gap = values / league_size
     return pd.cut(
-        values,
-        bins=[-np.inf, -12, 0, 12, 24, np.inf],
-        labels=["Below market", "Slight fade", "Near market", "1-round edge", "2+ round edge"],
+        round_gap,
+        bins=[-np.inf, -2, -1, 0, 1, 2, 3, np.inf],
+        labels=[
+            "2+ round fade",
+            "1-round fade",
+            "Slight fade",
+            "Near market",
+            "1-round edge",
+            "2-round edge",
+            "3+ round edge",
+        ],
         right=False,
     )
 
@@ -1530,7 +1578,9 @@ def calibrate_edge_probabilities(
 ) -> pd.DataFrame:
     """Estimate beat-ADP probability from comparable out-of-sample signals."""
     calibrated = forecast.copy()
-    calibrated["edge_bucket"] = _edge_bucket(calibrated["value_gap"])
+    calibrated["edge_bucket"] = _edge_bucket(
+        calibrated["value_gap"], config.league_size
+    )
     calibrated["market_tier"] = _market_tier(
         calibrated["market_rank"], config.league_size
     )
@@ -1540,7 +1590,9 @@ def calibrate_edge_probabilities(
         return calibrated
 
     history = historical_players.copy()
-    history["edge_bucket"] = _edge_bucket(history["predicted_rank_surplus"])
+    history["edge_bucket"] = _edge_bucket(
+        history["predicted_rank_surplus"], config.league_size
+    )
     history["market_tier"] = _market_tier(
         history["market_rank"], config.league_size
     )

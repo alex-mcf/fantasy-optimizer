@@ -122,8 +122,9 @@ same season and ADP round. Model-versus-market rank error and the rate at which 
 model override was closer to reality are shown as stricter checks. Historical
 player-level results can be downloaded for inspection.
 
-The board also carries a hard limit: no player may be ranked more than three
-rounds ahead of his market ADP. Ridge is linear, so it cannot express "efficient,
+The board also carries a hard limit: no player may be promoted more than a share
+of his own market rank — 35% of it, with a one-round floor, so a player going at
+pick 150 can move about 52 picks and one going at pick 30 can move 12. Ridge is linear, so it cannot express "efficient,
 but on almost no volume", and nothing else bounded how far a prediction could
 travel from the market — in 2024 it put a tight end with the position's best
 points per opportunity, earned on 40 of them, at rank 1 against a market rank of
@@ -131,8 +132,20 @@ points per opportunity, earned on 40 of them, at rank 1 against a market rank of
 deficit. Shrinking the rate features toward their position prior was the obvious
 fix and does not work: the model standardizes its features, so a monotone rescale
 is undone, and it cost about five lineup points a season for the complexity. The
-limit does work, is a no-op for ordinary bargains, and is insensitive to where it
-is set — anywhere between two and four rounds performs about the same.
+limit does work and is a no-op for ordinary bargains. It began as a flat three
+rounds, which was the wrong shape in two ways. It was too loose where the model
+is weakest — a promotion from round four to round two fits inside any flat limit,
+and early-round quarterbacks are its worst category. And because every pinned
+player was pushed to exactly the same distance from the market, their order
+became market order: the model's opinion about which late tight end was best, its
+single strongest segment at 89–95%, was erased.
+
+Scaling the allowance with market rank fixes both. Early promotions are held
+tighter, late ones can travel further, and because each player's limit differs
+their relative order survives — on the 2026 board the pinned players now keep
+their model ordering almost exactly (rank correlation 0.997, against market order
+before). It is worth about 14 lineup points a season over the flat version, and
+any share between 0.2 and 0.4 performs about the same.
 
 It binds almost entirely on tight ends, and that is not a mistake being corrected.
 The model promotes tight ends by 28 ranks on average and they realize a +35 rank
@@ -212,8 +225,25 @@ forecast does not train on them yet.
 The draft room accepts the current pick, next pick, drafted players, and roster
 counts. It estimates whether each available player will survive to the next
 selection using mock-draft variability, then labels choices as draft now,
-consider now, target while waiting, wait, or pass. This is an auditable
-heuristic. Players marked drafted there also drop off the board.
+consider now, target while waiting, wait, or pass. Players marked drafted there
+also drop off the board.
+
+Its shortlist ordering is fitted rather than assumed. `fit_decision_weights.py`
+scores candidate weightings on simulated drafts against the honest null
+hypothesis — just take the best player available on the blended board — and the
+original hand-chosen weights lost to that baseline by 20 points a season, and by
+135 in the worst one. The fitted weights beat it by 31 and are positive in five
+of six seasons, including out-of-sample when fitted only on earlier seasons.
+
+Two things came out of that fit. Roster construction dominates marginal value: an
+unfilled starting slot is worth roughly a starter's entire VORP, so that term is
+an order of magnitude larger than it was. And the value-gap term shrank, because
+the board rank already blends the gap in and counting it twice over-tilted the
+shortlist toward the model.
+
+```bash
+python scripts/fit_decision_weights.py
+```
 
 The sidebar controls league size, starting roster, superflex, draft slot, and
 total snake-draft rounds. Snake selections are calculated from your slot, with
@@ -285,9 +315,10 @@ at which position they pay, and whether they survive the market moving. Three
 results shape how the board should be read:
 
 - **Two rounds is the threshold.** Players the model moves up a single round beat
-  their ADP 49% of the time against a 42% base rate — inside the noise. Two-round
-  calls hit 63%, three-round 69%, and four-plus 90% with a mean realized surplus
-  of +51 ranks. The dashboard's headline count uses two rounds for this reason.
+  their ADP 48% of the time against a 44% base rate — inside the noise. Two-round
+  calls hit 61%, three-round 80%, and four-plus 92% with a mean realized surplus
+  of +60 ranks. Both the board's headline count and the draft room's "value"
+  label use two rounds for this reason.
 - **Position and stage matter as much as size.** Tight-end bargains after round 7
   beat their ADP in 89–95% of cases. Quarterbacks the model promotes into the
   first three rounds are its worst category by a wide margin. A disagreement is

@@ -13,13 +13,13 @@ import streamlit as st
 
 from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.forecasting.forecaster import (
-    MODEL_PROMOTION_CAP_ROUNDS,
     backtest_draft_value,
     backtest_forecaster,
     build_training_examples,
     build_team_position_outlook,
     calibrate_edge_probabilities,
     forecast_season,
+    promotion_allowance,
     segment_draft_value,
 )
 from fantasyoptimizer.market import (
@@ -59,6 +59,7 @@ DECISION_COLUMNS = {
     "platform_actionable_adp": "Take At",
     "rounds_moved": "Rounds Moved",
     "edge_probability": "Beat ADP %",
+    "calibration_sample": "Comparable Calls",
     "confidence": "Confidence",
 }
 PROJECTION_COLUMNS = {
@@ -225,8 +226,10 @@ with st.sidebar:
         )
     if superflex > 0 and platform == PLATFORM_OPTIONS[0]:
         st.caption(
-            "FFC baseline ADP is not superflex ADP. Upload your platform's "
-            "rankings for useful superflex prices."
+            "FFC baseline ADP is one-quarterback ADP, so in superflex it is the "
+            "wrong market twice over: prices are wrong, and the fair ranks and "
+            "promotion guard are both measured against it, which understates "
+            "quarterbacks. Upload your platform's rankings."
         )
 
 with st.spinner(f"Training on prior seasons and forecasting {target_year}..."):
@@ -244,9 +247,12 @@ forecast = apply_platform_adp(forecast, platform_adp, platform)
 forecast["rounds_moved"] = (
     (forecast["draft_market_rank"] - forecast["model_rank"]) / league_size
 ).round(1)
-promotion_limit = MODEL_PROMOTION_CAP_ROUNDS * league_size
+forecast["promotion_allowed"] = promotion_allowance(
+    forecast["market_rank"], league_config
+)
 forecast["guarded"] = (
-    forecast["market_rank"] - forecast["uncapped_model_rank"] > promotion_limit
+    forecast["market_rank"] - forecast["uncapped_model_rank"]
+    > forecast["promotion_allowed"]
 )
 blend_weight = float(forecast["blend_model_weight"].iloc[0])
 adp_metadata = load_adp_metadata(target_year)
@@ -367,9 +373,9 @@ with board_tab:
             "**Take At** blends market rank with the model at the fitted weight — "
             "it is where this player is worth drafting, not where he will go. "
             "**Rounds Moved** is how far the model disagrees with ADP. Two rounds "
-            "is the threshold worth acting on: one-round calls beat their ADP 49% "
-            "of the time against a 42% base rate, two-round calls 63%, and "
-            "four-plus 90%. Select a row for the reasoning behind a call."
+            "is the threshold worth acting on: one-round calls beat their ADP 48% "
+            "of the time against a 44% base rate, two-round calls 61%, three-round "
+            "80%, and four-plus 92%. Select a row for the reasoning behind a call."
         )
         chosen = selection.selection.rows if selection and selection.selection else []
         if chosen:
@@ -386,7 +392,14 @@ with board_tab:
                 "Rounds moved", f"{player['rounds_moved']:+.1f}"
             )
             headline[4].metric(
-                "Beat ADP", f"{100 * player['edge_probability']:.0f}%"
+                "Beat ADP",
+                f"{100 * player['edge_probability']:.0f}%",
+                help=(
+                    f"How often comparable {player['pos']} calls of this size and "
+                    "draft stage finished ahead of their ADP, across "
+                    f"{int(player['calibration_sample'])} historical cases "
+                    f"({player['edge_confidence'].lower()} evidence)."
+                ),
             )
             why = st.columns(2)
             why[0].markdown(
@@ -420,9 +433,9 @@ with board_tab:
             if player["guarded"]:
                 st.warning(
                     f"The model had him at {int(player['uncapped_model_rank'])} "
-                    f"overall — more than {MODEL_PROMOTION_CAP_ROUNDS} rounds ahead "
-                    f"of the market — and the guard pulled him back to "
-                    f"{int(player['model_rank'])}.",
+                    f"overall. From a market rank of {int(player['market_rank'])} he "
+                    f"is allowed to move up {int(player['promotion_allowed'])} picks, "
+                    f"so the guard placed him at {int(player['model_rank'])}.",
                     icon="🛑",
                 )
 
@@ -515,6 +528,8 @@ with draft_tab:
             "platform_actionable_adp": "Take At",
             "available_next_pick_probability": "Available Next Pick %",
             "edge_probability": "Beat ADP %",
+            "calibration_sample": "Comparable Calls",
+            "edge_confidence": "Evidence",
             "remaining_starter_need": "Starters Needed",
             "forecast_points": "Proj Points",
         }
@@ -526,7 +541,13 @@ with draft_tab:
         st.caption(
             "**Draft now** means fair value that probably will not survive to your "
             "next pick. **Target — may wait** is a value the model expects to still "
-            "be there. This is an auditable heuristic, not a solved draft."
+            "be there. A call only counts as a value at two rounds or more, because "
+            "one-round gaps have historically been noise.  \n"
+            "**Beat ADP %** is not a projection — it is how often players in the "
+            "same position, gap size, and part of the draft actually finished ahead "
+            "of their ADP, and **Comparable Calls** is how many of those there were. "
+            "A high rate on five comparable calls is a guess; the same rate on forty "
+            "is evidence."
         )
 
 with evidence_tab:
@@ -558,11 +579,11 @@ with evidence_tab:
 
 | Model moves him | Beat their ADP | Mean rank surplus |
 |---|---|---|
-| Within a round (base rate) | 42% | −8 |
-| 1 round | 49% | −4 |
-| 2 rounds | 63% | +14 |
-| 3 rounds | 69% | +28 |
-| 4+ rounds | 90% | +51 |
+| Within a round (base rate) | 44% | −7 |
+| 1 round | 48% | −5 |
+| 2 rounds | 61% | +9 |
+| 3 rounds | 80% | +35 |
+| 4+ rounds | 92% | +60 |
 
 Tight-end values after round 7 beat their ADP in 89–95% of cases. Quarterbacks
 promoted into the first three rounds are the model's worst category. Run
@@ -737,10 +758,11 @@ ridge models estimate the points implied by a player's mock-draft price, then a
 deliberately narrow model — eleven features of the player's own recent form —
 predicts where that price is wrong. Its penalty is fitted per position by holding
 out whole seasons inside the training window. League replacement levels turn the
-adjusted forecast into VORP and a fair rank, no player may be ranked more than
-{MODEL_PROMOTION_CAP_ROUNDS} rounds ahead of the market, and the board you draft
-from blends market rank with model rank at a weight fitted on simulated draft
-outcomes ({blend_weight:.0%} model today). Beat-ADP probabilities are calibrated
+adjusted forecast into VORP and a fair rank, no player may be promoted more than
+a fixed share of his own market rank — so a last-round flier can travel a long
+way and a second-round pick cannot — and the board you draft from blends market
+rank with model rank at a weight fitted on simulated draft outcomes
+({blend_weight:.0%} model today). Beat-ADP probabilities are calibrated
 only from chronological out-of-sample predictions.
         """
     )

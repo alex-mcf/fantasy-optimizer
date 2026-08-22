@@ -158,10 +158,23 @@ class DraftRecommendationTests(unittest.TestCase):
                     "stddev": 10.0,
                     "fair_adp": 45,
                     "model_rank": 45,
-                    "value_gap": 20,
+                    "value_gap": 26,
                     "model_value": 60.0,
                     "edge_probability": 0.7,
                     "forecast_points": 190.0,
+                },
+                {
+                    "player": "one round only",
+                    "pos": "WR",
+                    "team": "C",
+                    "adp_avg": 80.0,
+                    "stddev": 10.0,
+                    "fair_adp": 68,
+                    "model_rank": 68,
+                    "value_gap": 12,
+                    "model_value": 40.0,
+                    "edge_probability": 0.7,
+                    "forecast_points": 180.0,
                 },
             ]
         )
@@ -169,6 +182,9 @@ class DraftRecommendationTests(unittest.TestCase):
         recommendations = board.set_index("player")["recommendation"]
         self.assertEqual(recommendations["urgent"], "Draft now")
         self.assertEqual(recommendations["wait"], "Target — may wait")
+        # A one-round gap is not a value. Historically those beat their ADP 49%
+        # of the time against a 42% base rate, so the board does not chase them.
+        self.assertNotEqual(recommendations["one round only"], "Target — may wait")
         self.assertLess(
             board.set_index("player").loc["urgent", "available_next_pick_probability"],
             board.set_index("player").loc["wait", "available_next_pick_probability"],

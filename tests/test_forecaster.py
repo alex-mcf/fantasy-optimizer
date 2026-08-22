@@ -7,13 +7,13 @@ import numpy as np
 from fantasyoptimizer.config.league_config import LeagueConfig
 from fantasyoptimizer.forecasting.forecaster import (
     FEATURE_COLUMNS,
-    MODEL_PROMOTION_CAP_ROUNDS,
     RESIDUAL_ALPHA_GRID,
     RESIDUAL_FEATURE_COLUMNS,
     MarketResidualModel,
     RidgeModel,
     _cap_promotions,
     add_market_features,
+    promotion_allowance,
     add_official_role_context,
     build_features,
     calibrate_edge_probabilities,
@@ -75,14 +75,16 @@ class ForecasterTests(unittest.TestCase):
             }
         )
         # One last-round player the model wants at pick 1, and one ordinary
-        # two-round bargain that the guard has no business touching.
+        # bargain inside its own allowance that the guard has no business
+        # touching.
         board.loc[0, "market_rank"] = 158
-        board.loc[39, "market_rank"] = 64
+        board.loc[39, "market_rank"] = 55
         capped = _cap_promotions(board["model_rank"], board["market_rank"], config)
         board["capped"] = capped
-        limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
-        self.assertLessEqual(int((board["market_rank"] - board["capped"]).max()), limit)
-        self.assertGreaterEqual(int(board.loc[0, "capped"]), 158 - limit)
+        allowed = promotion_allowance(board["market_rank"], config)
+        self.assertTrue(((board["market_rank"] - board["capped"]) <= allowed).all())
+        # A last-round player may travel further than an early-round one.
+        self.assertGreater(allowed.iloc[0], allowed.iloc[39])
         # The ordinary bargain is still ranked where the model put it.
         self.assertLessEqual(int(board.loc[39, "capped"]), 40)
         self.assertEqual(sorted(capped.tolist()), list(range(1, size + 1)))
@@ -93,17 +95,18 @@ class ForecasterTests(unittest.TestCase):
             config = LeagueConfig(
                 league_size=int(rng.integers(4, 21)), qb=1, rb=2, wr=2, te=1, flex=1
             )
-            limit = MODEL_PROMOTION_CAP_ROUNDS * config.league_size
             size = int(rng.integers(1, 220))
             index = rng.permutation(size)
             model = pd.Series(rng.permutation(size) + 1, index=index)
             market = pd.Series(rng.permutation(size) + 1, index=index)
             capped = _cap_promotions(model, market, config)
+            allowed = promotion_allowance(market, config)
             self.assertEqual(sorted(capped.tolist()), list(range(1, size + 1)))
-            if size > limit:
-                self.assertLessEqual(int((market - capped).max()), limit)
-            # Players the market already prices inside the limit keep their order.
-            unheld = market <= limit + 1
+            if size > allowed.max():
+                self.assertTrue(((market - capped) <= allowed).all())
+            # Players the market already prices inside their own allowance keep
+            # their order.
+            unheld = market <= allowed + 1
             self.assertEqual(
                 list(np.argsort(capped[unheld].to_numpy())),
                 list(np.argsort(model[unheld].to_numpy())),

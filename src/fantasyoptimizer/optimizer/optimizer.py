@@ -20,14 +20,45 @@ POLICY_REQUIRED_COLUMNS = frozenset(
     {"target_year", "pos", "market_rank", "predicted_rank", "actual_points"}
 )
 
+# How far the model must move a player before the draft room calls it a value.
+ACTIONABLE_GAP_ROUNDS = 2
 
-def _starter_targets(config: LeagueConfig) -> dict[str, int]:
-    flex = config.flex
+# Weights for the draft-room ordering, fitted on simulated drafts by
+# scripts/fit_decision_weights.py against the honest null hypothesis: just take
+# the best player available on the blended board. The shipped hand-chosen
+# weights lost to that baseline by 20 points a season and by 135 in the worst
+# one; these beat it by 31 on average and are positive in five of six seasons.
+#
+# The lesson in the numbers is that roster construction dominates marginal value.
+# An unfilled starting slot is worth about as much as a starter's entire VORP, so
+# the need term is an order of magnitude larger than it was, while the value-gap
+# term shrank — the board rank already blends that gap in, and counting it twice
+# over-tilted the shortlist. Anything from roughly 48 to 200 on the need term
+# performs the same within noise; this sits mid-plateau rather than at the argmax,
+# which had a worse worst season. The edge-probability term was not part of the
+# fit and is small by construction.
+VALUE_GAP_WEIGHT = 0.15
+EDGE_PROBABILITY_WEIGHT = 12.0
+STARTER_NEED_WEIGHT = 60.0
+SCARCITY_WEIGHT = 8.0
+
+
+# A flex slot is split across the positions that can fill it. The same split is
+# used for replacement level in LeagueConfig; both are allocated at league scale
+# and divided back down, because rounding one team's tenth of a flex slot up to a
+# whole tight end invents starter demand that does not exist — and made one flex
+# slot indistinguishable from two.
+FLEX_SHARES = {"RB": 0.40, "WR": 0.50, "TE": 0.10}
+
+
+def _starter_targets(config: LeagueConfig) -> dict[str, float]:
+    """Starters each team needs at a position, counting flex as fractional need."""
+    flex_demand = config.league_size * config.flex
     return {
-        "QB": config.qb + config.superflex,
-        "RB": config.rb + ceil(flex * 0.4),
-        "WR": config.wr + ceil(flex * 0.5),
-        "TE": config.te + ceil(flex * 0.1),
+        "QB": float(config.qb + config.superflex),
+        "RB": config.rb + ceil(flex_demand * FLEX_SHARES["RB"]) / config.league_size,
+        "WR": config.wr + ceil(flex_demand * FLEX_SHARES["WR"]) / config.league_size,
+        "TE": config.te + ceil(flex_demand * FLEX_SHARES["TE"]) / config.league_size,
     }
 
 
@@ -76,7 +107,7 @@ def build_draft_recommendations(
     targets = _starter_targets(config)
     board["remaining_starter_need"] = board["pos"].map(
         lambda position: max(
-            targets.get(position, 0) - int(roster_counts.get(position, 0)), 0
+            targets.get(position, 0.0) - float(roster_counts.get(position, 0)), 0.0
         )
     )
     edge_probability = (
@@ -87,14 +118,17 @@ def build_draft_recommendations(
     value_gap = board.get("platform_value_gap", board["value_gap"])
     board["decision_score"] = (
         board["model_value"]
-        + 0.35 * value_gap
-        + 12 * (edge_probability - 0.5)
-        + 6 * board["remaining_starter_need"]
-        + 8 * board["drafted_before_next_probability"]
+        + VALUE_GAP_WEIGHT * value_gap
+        + EDGE_PROBABILITY_WEIGHT * (edge_probability - 0.5)
+        + STARTER_NEED_WEIGHT * board["remaining_starter_need"]
+        + SCARCITY_WEIGHT * board["drafted_before_next_probability"]
     )
 
     urgent = board["available_next_pick_probability"] < 0.35
-    strong_edge = value_gap >= config.league_size
+    # Two rounds, not one. A one-round gap beats its ADP 48% of the time against
+    # a 44% base rate, which is noise; two rounds hits 61%, three 80%, and
+    # four-plus 92%. See scripts/evaluate_adp_comparison.py.
+    strong_edge = value_gap >= ACTIONABLE_GAP_ROUNDS * config.league_size
     decision_rank = (
         board["platform_actionable_adp"]
         if "platform_actionable_adp" in board
