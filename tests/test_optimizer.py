@@ -10,6 +10,7 @@ from fantasyoptimizer.optimizer import (
     nested_policy_blend_weights,
     simulate_historical_draft_strategies,
     snake_pick_numbers,
+    value_over_next_available,
 )
 from fantasyoptimizer.forecasting.forecaster import DEFAULT_MODEL_BLEND_WEIGHT
 
@@ -189,6 +190,28 @@ class DraftRecommendationTests(unittest.TestCase):
             board.set_index("player").loc["urgent", "available_next_pick_probability"],
             board.set_index("player").loc["wait", "available_next_pick_probability"],
         )
+
+    def test_cost_of_waiting_sees_the_cliff_and_the_flat_position(self):
+        # RB: one good player, and the next one is unlikely to last.
+        # TE: two interchangeable players, one of whom will certainly reach you.
+        forecast = pd.DataFrame(
+            [
+                {"player": "rb1", "pos": "RB", "adp_avg": 5.0, "stddev": 3.0,
+                 "fair_adp": 5, "forecast_points": 260.0},
+                {"player": "rb2", "pos": "RB", "adp_avg": 12.0, "stddev": 3.0,
+                 "fair_adp": 12, "forecast_points": 150.0},
+                {"player": "te1", "pos": "TE", "adp_avg": 6.0, "stddev": 3.0,
+                 "fair_adp": 6, "forecast_points": 180.0},
+                {"player": "te2", "pos": "TE", "adp_avg": 200.0, "stddev": 3.0,
+                 "fair_adp": 200, "forecast_points": 178.0},
+            ]
+        )
+        cost = value_over_next_available(forecast, next_pick=30).round(0)
+        by_player = dict(zip(forecast["player"], cost))
+        # Passing on rb1 costs most of his value; passing on te1 costs almost
+        # nothing, because te2 is equivalent and certain to be there.
+        self.assertGreater(by_player["rb1"], 100)
+        self.assertLess(by_player["te1"], 10)
 
     def test_board_removes_drafted_players(self):
         forecast = pd.DataFrame(

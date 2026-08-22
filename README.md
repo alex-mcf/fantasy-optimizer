@@ -245,6 +245,26 @@ shortlist toward the model.
 python scripts/fit_decision_weights.py
 ```
 
+The draft room also shows the **cost of waiting** at each position: the drop from
+the best player available now to the best one likely to still be there at your
+next pick. If the edge is positional, this is the question the tool exists to
+answer, and it is the number that should drive a pick. It is displayed rather
+than sorted on — as an ordering rule it was measured against the fitted decision
+score and lost, matching it on average while being worse in the worst season.
+
+## Freezing a board
+
+```bash
+python scripts/freeze_board.py
+```
+
+Everything here refits as seasons arrive, which is right for a forecaster and
+wrong for an evaluation: by January the board will not be the board you drafted
+from. This writes the current one to `data/boards/` with the settings that
+produced it — fitted weights, guard parameters, residual features, ADP
+provenance, and the positional allocation — so the first untouched test of the
+model is graded against what it actually said.
+
 The sidebar controls league size, starting roster, superflex, draft slot, and
 total snake-draft rounds. Snake selections are calculated from your slot, with
 manual pick-number overrides for keepers or traded picks. The supported scoring
@@ -299,6 +319,37 @@ season's `snapshots/` folder. Once multiple points in the draft season have been
 collected, those snapshots can train and validate a separate closing-ADP
 movement model. Official-role refreshes preserve timestamped copies in the same
 folder so depth-chart changes can be audited without overwriting prior states.
+
+## What the edge actually is
+
+The board's advantage over ADP decomposes into two very different things, and the
+split matters more than the headline number:
+
+- **The positional call carries it.** The model takes more quarterbacks and tight
+  ends, and fewer receivers, than the market does in the early rounds. On the
+  2026 board that is 8 QB and 6 TE in the first five rounds against the market's
+  4 and 2. Isolated, that call is worth roughly +100 lineup points a season.
+- **Within a position, the model has no measurable ordering skill.** Its rank
+  correlation with realized points is 0.425 against the market's 0.428, the gap
+  is under 0.1 ranks at every depth from the top three to the whole pool, and it
+  identifies the best player at a position exactly as often as ADP (4 of 24
+  position-seasons).
+
+The obvious conclusion — take ADP's ordering inside each position — is wrong, and
+measurably so. Drafting the model's positional plan with ADP's ordering is worth
++14 lineup points a season; drafting it with the model's own ordering is worth
++64. Blending toward the market degrades it monotonically.
+
+The reason is not accuracy, it is correlation. Opponents draft by ADP, so a board
+that shares ADP's ordering wants the same players at the same moments and pays
+market price for them. An ordering that is equally accurate but *different* buys
+equivalent players later: across the backtest, drafting off the model's ordering
+acquires players at an average ADP of 57.8 against 55.5, and scores 1353 lineup
+points against 1306. Being differently right is worth more than being more right.
+
+The practical reading: treat a screen of values as **one correlated bet about
+positions**, not as a list of independent player insights, and do not assume the
+model knows which tight end is best — only that it wants a tight end.
 
 ## Using the board against a mock ADP
 

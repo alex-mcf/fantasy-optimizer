@@ -1,0 +1,96 @@
+{
+  "target_season": 2026,
+  "frozen_at_utc": "2026-08-22T05:54:33.732204+00:00",
+  "trained_through_season": 2025,
+  "league": {
+    "teams": 12,
+    "qb": 1,
+    "rb": 2,
+    "wr": 2,
+    "te": 1,
+    "flex": 1,
+    "superflex": 0
+  },
+  "adp_source_metadata": {
+    "season": 2026,
+    "source": "Fantasy Football Calculator",
+    "source_url": "https://fantasyfootballcalculator.com/api/v1/adp/half-ppr",
+    "parameters": {
+      "scoring": "half-ppr",
+      "teams": 12,
+      "position": "all"
+    },
+    "fetched_at_utc": "2026-08-15T03:00:36.323576+00:00",
+    "source_meta": {
+      "type": "Half-PPR",
+      "teams": 12,
+      "rounds": 15,
+      "total_drafts": 2391,
+      "start_date": "2026-08-09",
+      "end_date": "2026-08-14"
+    },
+    "positions": [
+      "QB",
+      "RB",
+      "WR",
+      "TE"
+    ],
+    "players": 186
+  },
+  "fitted": {
+    "model_blend_weight": 0.25,
+    "nested_season_weights": {
+      "2020": 0.25,
+      "2021": 0.5,
+      "2022": 0.2,
+      "2023": 0.3,
+      "2024": 0.25,
+      "2025": 0.25
+    },
+    "residual_alpha_grid": [
+      300.0,
+      1000.0,
+      3000.0,
+      10000.0,
+      30000.0,
+      1000000000.0
+    ],
+    "residual_features": [
+      "weighted_ppg",
+      "lag1_ppg",
+      "trend",
+      "weighted_games",
+      "lag1_games",
+      "weighted_opp",
+      "weighted_ppo",
+      "age",
+      "experience",
+      "rookie",
+      "history_seasons"
+    ],
+    "promotion_cap_share": 0.35,
+    "promotion_floor_rounds": 1,
+    "decision_weights": {
+      "value_gap": 0.15,
+      "edge_probability": 12.0,
+      "starter_need": 60.0,
+      "scarcity": 8.0
+    },
+    "actionable_gap_rounds": 2
+  },
+  "positional_allocation_first_five_rounds": {
+    "model": {
+      "RB": 26,
+      "WR": 20,
+      "QB": 8,
+      "TE": 6
+    },
+    "market": {
+      "WR": 30,
+      "RB": 24,
+      "QB": 4,
+      "TE": 2
+    }
+  },
+  "players": 186
+}

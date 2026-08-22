@@ -37,6 +37,9 @@ ACTIONABLE_GAP_ROUNDS = 2
 # performs the same within noise; this sits mid-plateau rather than at the argmax,
 # which had a worse worst season. The edge-probability term was not part of the
 # fit and is small by construction.
+# Kept at 0.15 rather than the 0.0 the nested runs preferred: 0.0 wins on the
+# mean by a few points but loses on the worst season by 20-30, consistently
+# across seeds. Same trade as the blend weight — take the flatter tail.
 VALUE_GAP_WEIGHT = 0.15
 EDGE_PROBABILITY_WEIGHT = 12.0
 STARTER_NEED_WEIGHT = 60.0
@@ -65,6 +68,54 @@ def _starter_targets(config: LeagueConfig) -> dict[str, float]:
 def _available_next_pick(adp: float, deviation: float, next_pick: int) -> float:
     deviation = max(float(deviation), 4.0)
     return float(1 - NormalDist(mu=float(adp), sigma=deviation).cdf(next_pick))
+
+
+def value_over_next_available(
+    board: pd.DataFrame, next_pick: int, points_column: str = "forecast_points"
+) -> pd.Series:
+    """What a player is worth over the best one at his position you can still get.
+
+    Replacement level answers "how much better than a waiver-wire body is he?",
+    which is a season-long question. At a pick the question is narrower: if you
+    pass, what is the best player at this position likely to reach you next time?
+    That difference is the actual cost of waiting, and it is what makes a position
+    urgent rather than merely good.
+
+    The survivor is expected, not assumed: each candidate contributes his value
+    weighted by the chance he lasts and that everyone the board likes more does
+    not.
+    """
+    adp_column = "draft_adp" if "draft_adp" in board else "adp_avg"
+    deviation_column = "draft_adp_stddev" if "draft_adp_stddev" in board else "stddev"
+    deviation = board.get(
+        deviation_column, pd.Series(12.0, index=board.index)
+    ).fillna(12.0)
+    survival = pd.Series(
+        [
+            _available_next_pick(adp, spread, next_pick)
+            for adp, spread in zip(board[adp_column], deviation)
+        ],
+        index=board.index,
+    )
+    order_column = (
+        "platform_actionable_adp"
+        if "platform_actionable_adp" in board
+        else board.columns[board.columns.get_indexer(["actionable_adp"])[0]]
+        if "actionable_adp" in board
+        else "fair_adp"
+    )
+    values = board[points_column].astype(float)
+    next_best = pd.Series(0.0, index=board.index)
+    for _, group in board.groupby("pos"):
+        ordered = group.sort_values(order_column).index
+        remaining = 1.0
+        expected = 0.0
+        for index in ordered:
+            expected += values[index] * survival[index] * remaining
+            remaining *= 1 - survival[index]
+        # Everyone at the position could be gone; that residual is worth nothing.
+        next_best.loc[group.index] = expected
+    return values - next_best
 
 
 def build_draft_recommendations(
@@ -103,6 +154,11 @@ def build_draft_recommendations(
     board["drafted_before_next_probability"] = (
         1 - board["available_next_pick_probability"]
     )
+    # Shown, not sorted on. Cost of waiting is the question a human is actually
+    # asking at a pick, but as an ordering rule it was measured against the
+    # fitted score and lost — equal on average, worse in the worst season — so it
+    # informs the reader rather than replacing a fitted rule with an unfitted one.
+    board["value_over_next_available"] = value_over_next_available(board, next_pick)
 
     targets = _starter_targets(config)
     board["remaining_starter_need"] = board["pos"].map(

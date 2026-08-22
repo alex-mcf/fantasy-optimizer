@@ -33,6 +33,7 @@ from fantasyoptimizer.optimizer import (
     policy_blend_weights,
     simulate_historical_draft_strategies,
     snake_pick_numbers,
+    value_over_next_available,
 )
 from fantasyoptimizer.scoring.scoring_engine import SUPPORTED_POSITIONS
 from fantasyoptimizer.utils.data_loader import (
@@ -344,6 +345,41 @@ with board_tab:
         "Platform coverage", f"{int(forecast['platform_match'].sum())}/{len(forecast)}"
     )
 
+    with st.expander("What this board is actually claiming", expanded=False):
+        early = league_size * 5
+        model_mix = forecast.nsmallest(early, "model_rank")["pos"].value_counts()
+        market_mix = forecast.nsmallest(early, "draft_market_rank")["pos"].value_counts()
+        mix = pd.DataFrame(
+            {
+                "Model takes": model_mix,
+                "Market takes": market_mix,
+            }
+        ).fillna(0).astype(int)
+        mix["Difference"] = mix["Model takes"] - mix["Market takes"]
+        st.dataframe(
+            mix.reindex(list(SUPPORTED_POSITIONS)).reset_index(names="Pos"),
+            hide_index=True,
+            width="stretch",
+        )
+        st.markdown(
+            f"""
+Through the first five rounds ({early} picks), that is the whole disagreement.
+
+**It is one bet, not {int((forecast['platform_value_gap'] >= 2 * league_size).sum())}
+independent ones.** Backtests split the board's edge in two: the positional call
+is worth about +100 lineup points a season, while the model's ordering *within* a
+position is statistically indistinguishable from ADP — 0.425 rank correlation
+against the market's 0.428, and it picks the best player at a position exactly as
+often as ADP does (4 of 24).
+
+That ordering is still worth using, for a reason that is not accuracy. Because it
+disagrees with the market's queue while being equally right, drafting off it buys
+players about two picks later in ADP for more realized points. But read a list of
+values as one correlated claim about positions, not as a list of individual
+insights.
+            """
+        )
+
     detail = st.segmented_control(
         "Detail",
         ["Decision", "+ Projection", "+ Evidence", "Everything"],
@@ -508,6 +544,38 @@ with draft_tab:
         for position, column in zip(SUPPORTED_POSITIONS, roster_cols)
     }
 
+    cliff = (
+        forecast[~forecast["player"].isin(st.session_state.get("drafted_players", []))]
+        .assign(
+            cost=lambda frame: value_over_next_available(frame, next_pick),
+        )
+        .sort_values("platform_actionable_adp")
+        .groupby("pos")
+        .head(1)
+        .set_index("pos")
+    )
+    st.caption(
+        f"What waiting from pick {current_pick} to pick {next_pick} costs at each "
+        "position — the drop from the best player there now to the best one "
+        "likely to reach you. This is the model's real edge: it is better at "
+        "which position to take than at which player."
+    )
+    cliff_cols = st.columns(len(SUPPORTED_POSITIONS))
+    for column, position in zip(cliff_cols, SUPPORTED_POSITIONS):
+        if position not in cliff.index:
+            continue
+        row = cliff.loc[position]
+        drop = float(row["cost"])
+        column.metric(
+            position,
+            f"−{drop:.0f} pts" if drop >= 0.5 else "no drop",
+            help=(
+                f"Best available now: {str(row['player']).title()} at "
+                f"{row['forecast_points']:.0f} projected points. A position with "
+                "no drop can wait — the next player there is as good as this one."
+            ),
+        )
+
     recommendations = build_draft_recommendations(
         forecast,
         current_pick,
@@ -527,6 +595,7 @@ with draft_tab:
             "draft_adp": "ADP",
             "platform_actionable_adp": "Take At",
             "available_next_pick_probability": "Available Next Pick %",
+            "value_over_next_available": "Cost Of Waiting",
             "edge_probability": "Beat ADP %",
             "calibration_sample": "Comparable Calls",
             "edge_confidence": "Evidence",

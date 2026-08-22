@@ -7,6 +7,7 @@ from fantasyoptimizer.optimizer.optimizer import (
     policy_blend_weights,
     simulate_historical_draft_strategies,
     snake_pick_numbers,
+    value_over_next_available,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "policy_blend_weights",
     "simulate_historical_draft_strategies",
     "snake_pick_numbers",
+    "value_over_next_available",
 ]
